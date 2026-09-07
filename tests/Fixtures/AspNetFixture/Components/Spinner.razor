@@ -1,0 +1,5 @@
+@* Regression fixture (P1 follow-up): the only Spinner.razor in this project, referenced
+   from OrderForm.razor both by its plain tag name (must resolve here) and by a dotted tag
+   naming an unrelated external namespace (must NOT resolve here, even though this is the
+   only same-file-name candidate in the project). *@
+<span class="spinner">...</span>

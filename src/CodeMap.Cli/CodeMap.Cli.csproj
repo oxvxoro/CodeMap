@@ -1,0 +1,41 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\CodeMap.Core\CodeMap.Core.csproj" />
+    <ProjectReference Include="..\CodeMap.Storage\CodeMap.Storage.csproj" />
+    <ProjectReference Include="..\CodeMap.CSharp\CodeMap.CSharp.csproj" />
+    <ProjectReference Include="..\CodeMap.Mcp\CodeMap.Mcp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.9.0" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>codemap</AssemblyName>
+    <Version>0.1.0</Version>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+    <InformationalVersion>0.1.0</InformationalVersion>
+    <PackageId>CodeMap.Cli</PackageId>
+    <PackageTags>codemap;code-analysis;repository;developer-tools</PackageTags>
+    <Authors>CodeMap contributors</Authors>
+    <Description>Local semantic code indexer and agent-friendly query CLI.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>AGENT_INTEGRATION.md</PackageReadmeFile>
+    <PackageReleaseNotes>Initial release with C#, JavaScript, TypeScript, HTML, and CSS indexing.</PackageReleaseNotes>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>codemap</ToolCommandName>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)..\..\artifacts\packages\</PackageOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\docs\AGENT_INTEGRATION.md" Pack="true" PackagePath="AGENT_INTEGRATION.md" />
+  </ItemGroup>
+
+</Project>

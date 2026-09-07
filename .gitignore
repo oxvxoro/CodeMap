@@ -1,0 +1,13 @@
+bin/
+obj/
+artifacts/
+.codemap/
+*.user
+.vs/
+.idea/
+.env
+.env.local
+.env.*.local
+INDEX.md
+logs/
+BenchmarkDotNet.Artifacts/

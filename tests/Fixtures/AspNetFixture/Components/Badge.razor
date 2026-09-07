@@ -1,0 +1,6 @@
+@* Ambiguous-name-but-namespace-qualified fixture half 1 of 2 (plan §6, P1 fix): another
+   RazorComponent artifact shares this file's simple name (Badge) via
+   Components/Alt/Badge.razor. OrderForm.razor references this one with the fully-qualified
+   tag <AspNetFixture.Components.Badge />, which must resolve here (not to Alt/Badge.razor,
+   and not to no edge at all) even though this component has no code-behind. *@
+<span class="badge">badge</span>

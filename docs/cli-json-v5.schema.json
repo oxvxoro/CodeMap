@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codemap.local/schemas/cli-json-v5.json",
+  "title": "CodeMap CLI JSON v5",
+  "oneOf": [
+    { "$ref": "#/$defs/queryResponse" },
+    { "$ref": "#/$defs/pairRelationResponse" },
+    { "$ref": "#/$defs/mapResponse" },
+    { "$ref": "#/$defs/contextResponse" },
+    { "$ref": "#/$defs/diffResponse" },
+    { "$ref": "#/$defs/architectureResponse" },
+    { "$ref": "#/$defs/errorResponse" }
+  ],
+  "$defs": {
+    "match": {
+      "type": "object",
+      "required": ["id", "project", "kind", "name", "qualifiedName", "file", "language"],
+      "properties": {
+        "id": { "type": "string" },
+        "project": { "type": "string" },
+        "kind": { "type": "string" },
+        "name": { "type": "string" },
+        "qualifiedName": { "type": "string" },
+        "signature": { "type": ["string", "null"] },
+        "file": { "type": "string" },
+        "startLine": { "type": ["integer", "null"] },
+        "endLine": { "type": ["integer", "null"] },
+        "language": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "location": {
+      "type": "object",
+      "required": ["file"],
+      "properties": {
+        "file": { "type": "string" },
+        "line": { "type": ["integer", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "relation": {
+      "type": "object",
+      "required": ["kind", "source", "target", "sourceId", "targetId", "edgeKind", "resolutionKind"],
+      "properties": {
+        "kind": { "type": "string" },
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "sourceId": { "type": "string" },
+        "targetId": { "type": "string" },
+        "depth": { "type": ["integer", "null"] },
+        "edgeKind": {
+          "type": "string",
+          "enum": [
+            "Contains", "Defines", "References", "Calls", "Imports", "Inherits", "Implements",
+            "Constructs", "UsesType", "Overrides", "ImplementedBy", "UsedBy", "UsesCss", "UsesElement",
+            "RoutesTo", "Renders", "BindsTo", "HandlesEvent", "Registers", "ResolvesTo", "UsesViewModel"
+          ]
+        },
+        "resolutionKind": { "enum": ["semantic", "syntactic", "heuristic"] },
+        "confidence": { "type": ["number", "null"] },
+        "location": { "oneOf": [{ "$ref": "#/$defs/location" }, { "type": "null" }] },
+        "evidence": {
+          "type": ["string", "null"],
+          "enum": [
+            "semantic", "static-import", "same-file-fallback", "name-fallback", "css-selector",
+            "dom-selector", "razor-component-tag", "markup-event-binding", "xaml-viewmodel-reference",
+            "markup-data-binding", "unknown", null
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "risk": {
+      "type": "object",
+      "required": ["level", "publicApis", "callers", "crossProject", "untested", "weightedTotal"],
+      "properties": {
+        "level": { "enum": ["high", "medium", "low"] },
+        "publicApis": { "type": "integer" },
+        "callers": { "type": "integer" },
+        "crossProject": { "type": "integer" },
+        "untested": { "type": "integer" },
+        "weightedTotal": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "queryResponse": {
+      "type": "object",
+      "required": ["version", "query", "matches", "relations", "stale"],
+      "properties": {
+        "version": { "const": 5 },
+        "query": { "type": "string" },
+        "matches": { "type": "array", "items": { "$ref": "#/$defs/match" } },
+        "relations": { "type": "array", "items": { "$ref": "#/$defs/relation" } },
+        "stale": { "type": "boolean" },
+        "reason": { "type": ["string", "null"], "enum": ["no_matches", "ambiguous", null] }
+      },
+      "additionalProperties": false
+    },
+    "pairRelationResponse": {
+      "type": "object",
+      "required": ["version", "source", "target", "matches", "relations", "stale"],
+      "properties": {
+        "version": { "const": 5 },
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "matches": { "type": "array", "items": { "$ref": "#/$defs/match" } },
+        "relations": { "type": "array", "items": { "$ref": "#/$defs/relation" } },
+        "stale": { "type": "boolean" },
+        "reason": { "type": ["string", "null"], "enum": ["no_matches", "ambiguous", null] }
+      },
+      "additionalProperties": false
+    },
+    "diffResponse": {
+      "type": "object",
+      "required": ["version", "base", "changedFiles", "matches", "relations", "risk", "stale", "analysisComplete", "unresolvedChangedFiles"],
+      "properties": {
+        "version": { "const": 5 },
+        "base": { "type": "string" },
+        "changedFiles": { "type": "array", "items": { "type": "string" } },
+        "matches": { "type": "array", "items": { "$ref": "#/$defs/match" } },
+        "relations": { "type": "array", "items": { "$ref": "#/$defs/relation" } },
+        "risk": { "$ref": "#/$defs/risk" },
+        "stale": { "type": "boolean" },
+        "analysisComplete": { "type": "boolean" },
+        "unresolvedChangedFiles": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "architectureResponse": {
+      "type": "object",
+      "required": ["version", "violations", "stale"],
+      "properties": {
+        "version": { "const": 5 },
+        "violations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "message"],
+            "properties": {
+              "kind": { "type": "string" },
+              "message": { "type": "string" },
+              "source": { "type": ["string", "null"] },
+              "target": { "type": ["string", "null"] }
+            },
+            "additionalProperties": false
+          }
+        },
+        "stale": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "mapResponse": {
+      "type": "object",
+      "required": ["version", "tokenBudget", "estimatedTokens", "lines", "stale"],
+      "properties": {
+        "version": { "const": 4 },
+        "project": { "type": ["string", "null"] },
+        "focus": { "type": ["string", "null"] },
+        "tokenBudget": { "type": "integer" },
+        "estimatedTokens": { "type": "integer" },
+        "lines": { "type": "array", "items": { "type": "string" } },
+        "stale": { "type": "boolean" },
+        "mermaid": { "type": ["string", "null"] },
+        "format": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "contextResponse": {
+      "type": "object",
+      "required": ["version", "task", "matches", "relations", "mapLines", "stale"],
+      "properties": {
+        "version": { "const": 5 },
+        "task": { "type": "string" },
+        "matches": { "type": "array", "items": { "$ref": "#/$defs/match" } },
+        "relations": { "type": "array", "items": { "$ref": "#/$defs/relation" } },
+        "mapLines": { "type": "array", "items": { "type": "string" } },
+        "stale": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "errorResponse": {
+      "type": "object",
+      "required": ["version", "error"],
+      "properties": {
+        "version": { "const": 5 },
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "enum": ["index_not_found", "schema_outdated", "query_failed", "git_unavailable"] },
+            "message": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

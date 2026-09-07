@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CodeMap.Cli/CodeMap.Cli.csproj" />
+    <Project Path="src/CodeMap.Core/CodeMap.Core.csproj" />
+    <Project Path="src/CodeMap.CSharp/CodeMap.CSharp.csproj" />
+    <Project Path="src/CodeMap.Web/CodeMap.Web.csproj" />
+    <Project Path="src/CodeMap.Mcp/CodeMap.Mcp.csproj" />
+    <Project Path="src/CodeMap.Storage/CodeMap.Storage.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CodeMap.Core.Tests/CodeMap.Core.Tests.csproj" />
+  </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/CodeMap.Benchmarks/CodeMap.Benchmarks.csproj" />
+  </Folder>
+</Solution>

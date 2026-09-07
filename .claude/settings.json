@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "codemap": {
+      "command": "dotnet",
+      "args": [
+        "run",
+        "--project",
+        "src/CodeMap.Cli/CodeMap.Cli.csproj",
+        "--no-build",
+        "--",
+        "mcp"
+      ],
+      "cwd": "c:\\Users\\eunseok\\Documents\\GitHub\\codemap"
+    }
+  }
+}

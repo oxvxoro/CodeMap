@@ -1,0 +1,13 @@
+@* Exercises: child component render, [Parameter] attribute binding, @bind, @onclick.
+   Backed by OrderForm.razor.cs (code-behind convention) so the bound members are real
+   Roslyn symbols the analyzer can resolve — this project does not compile @code blocks. *@
+<div class="order-form">
+    <input value="@CustomerName" @bind="CustomerName" />
+    <button @onclick="Submit">Submit</button>
+    <OrderSummary Total="@OrderTotal" InternalNote="ignored" />
+    <OrderStatusBadge />
+    <OrderTag />
+    <AspNetFixture.Components.Badge />
+    <Spinner />
+    <External.Library.Spinner />
+</div>

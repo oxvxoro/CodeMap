@@ -1,0 +1,9 @@
+  [mcp_servers.rider]
+    url = "http://127.0.0.1:64482/stream"
+
+[sandbox_workspace_write]
+network_access = true
+
+[features.network_proxy]
+enabled = true
+domains = { "**.nuget.org" = "allow" }

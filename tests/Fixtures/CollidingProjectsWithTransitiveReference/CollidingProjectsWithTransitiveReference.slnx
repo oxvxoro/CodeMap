@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="ProjA/ProjA.csproj" />
+  <Project Path="ProjB/ProjB.csproj" />
+  <Project Path="Middle/Middle.csproj" />
+  <Project Path="Caller/Caller.csproj" />
+</Solution>

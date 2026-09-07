@@ -1,0 +1,43 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore CodeMap.slnx
+
+      - name: Build CLI (Release)
+        run: dotnet build src/CodeMap.Cli/CodeMap.Cli.csproj -c Release
+
+      - name: Run quota A/B measurement
+        run: python3 benchmarks/quota_ab.py
+
+      - name: Upload quota A/B results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quota-ab-results
+          path: artifacts/quota-ab-results.json
+
+      - name: Run benchmarks
+        run: dotnet run -c Release --project benchmarks/CodeMap.Benchmarks --filter '*'
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: BenchmarkDotNet.Artifacts/results/*
