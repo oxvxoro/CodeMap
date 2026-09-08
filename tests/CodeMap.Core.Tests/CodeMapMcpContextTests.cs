@@ -270,6 +270,55 @@ public sealed class CodeMapMcpContextTests
         }
     }
 
+    [Fact]
+    public async Task FindSymbol_FreshnessProbeVersionMismatch_PropagatesAndIndexRemainsReusable()
+    {
+        var workingDirectory = CopyFixtureToTempDirectory();
+        try
+        {
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+            using var context = new CodeMapMcpContext(workingDirectory)
+            {
+                FreshnessProbe = (_, _) => Task.FromException<bool>(new InvalidOperationException("CodeMap index schema is outdated."))
+            };
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                CodeMapTools.FindSymbol(context, "Greeter", workingDirectory, cancellationToken: CancellationToken.None));
+
+            var databasePath = Path.Combine(workingDirectory, ".codemap", "index.db");
+            var graph = await new CodeMapQueryStore(databasePath).LoadAsync();
+            Assert.Contains(graph.Symbols, symbol => symbol.Name == "Greeter");
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task FindSymbol_FreshnessProbeIOException_ReturnsStale()
+    {
+        var workingDirectory = CopyFixtureToTempDirectory();
+        try
+        {
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+            using var context = new CodeMapMcpContext(workingDirectory)
+            {
+                FreshnessProbe = (_, _) => Task.FromException<bool>(new IOException("Simulated freshness probe I/O failure."))
+            };
+
+            var response = await CodeMapTools.FindSymbol(context, "Greeter", workingDirectory, cancellationToken: CancellationToken.None);
+            using var document = JsonDocument.Parse(response);
+
+            Assert.True(document.RootElement.GetProperty("stale").GetBoolean());
+            Assert.NotEmpty(document.RootElement.GetProperty("matches").EnumerateArray());
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
 
 
 

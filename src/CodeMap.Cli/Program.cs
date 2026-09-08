@@ -626,7 +626,7 @@ public static partial class Program
         {
             throw;
         }
-        catch
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             return true;
         }
@@ -651,7 +651,7 @@ public static partial class Program
         {
             throw;
         }
-        catch
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             return true;
         }

@@ -437,13 +437,14 @@ public static class CodeMapTools
             await connection.DisposeAsync();
             throw;
         }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return (new CodeMapQueryService(connection), Stale: true);
+        }
         catch
         {
-
-
-
-
-            return (new CodeMapQueryService(connection), Stale: true);
+            await connection.DisposeAsync();
+            throw;
         }
     }
 
