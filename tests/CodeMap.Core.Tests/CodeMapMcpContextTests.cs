@@ -235,6 +235,41 @@ public sealed class CodeMapMcpContextTests
         }
     }
 
+    [Fact]
+    public async Task FindSymbol_CancelledDuringFreshnessProbe_PropagatesAndIndexRemainsReusable()
+    {
+        var workingDirectory = CopyFixtureToTempDirectory();
+        try
+        {
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var context = new CodeMapMcpContext(workingDirectory)
+            {
+                FreshnessProbe = async (_, cancellationToken) =>
+                {
+                    entered.SetResult();
+                    await Task.Delay(Timeout.Infinite, cancellationToken);
+                    return true;
+                }
+            };
+            using var cancellation = new CancellationTokenSource();
+            var find = CodeMapTools.FindSymbol(context, "Greeter", workingDirectory, cancellationToken: cancellation.Token);
+
+            await entered.Task;
+            await cancellation.CancelAsync();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => find);
+
+            var databasePath = Path.Combine(workingDirectory, ".codemap", "index.db");
+            var graph = await new CodeMapQueryStore(databasePath).LoadAsync();
+            Assert.Contains(graph.Symbols, symbol => symbol.Name == "Greeter");
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
 
 
 

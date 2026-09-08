@@ -426,14 +426,15 @@ public static class CodeMapTools
         var store = new CodeMapQueryStore(databasePath);
         var connectionTask = store.OpenReadOnlyConnectionAsync(cancellationToken);
         var staleTask = context.IsUpToDateAsync(Path.GetDirectoryName(Path.GetDirectoryName(databasePath))!, cancellationToken);
-        await connectionTask;
+        var connection = await connectionTask;
         try
         {
             var upToDate = await staleTask;
-            return (new CodeMapQueryService(connectionTask.Result), !upToDate);
+            return (new CodeMapQueryService(connection), !upToDate);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            await connection.DisposeAsync();
             throw;
         }
         catch
@@ -442,7 +443,7 @@ public static class CodeMapTools
 
 
 
-            return (new CodeMapQueryService(connectionTask.Result), Stale: true);
+            return (new CodeMapQueryService(connection), Stale: true);
         }
     }
 

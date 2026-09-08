@@ -76,6 +76,35 @@ public sealed class CliProcessTests
     }
 
     [Fact(Timeout = 90_000)]
+    public async Task Watch_ChangeImmediatelyAfterStartupSignal_IsIndexed()
+    {
+        var workingDirectory = CopyFixture("MultiProject");
+        await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+        using var process = StartWatchProcess(workingDirectory, debounceMs: 100);
+        try
+        {
+            await WaitForWatchStartupAsync(process);
+            await File.WriteAllTextAsync(
+                Path.Combine(workingDirectory, "ProjA", "WatchStartup.cs"),
+                "namespace Fixture.ProjA; public sealed class WatchStartup { }");
+
+            await WaitUntilAsync(async () =>
+            {
+                var graph = await new CodeMapQueryStore(Path.Combine(workingDirectory, ".codemap", "index.db")).LoadAsync();
+                return graph.Symbols.Any(symbol => symbol.Name == "WatchStartup");
+            }, TimeSpan.FromSeconds(25));
+
+            Assert.False(process.HasExited, await ReadProcessDiagnosticsAsync(process));
+        }
+        finally
+        {
+            StopProcess(process);
+            AssertNoStateTempFiles(workingDirectory);
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact(Timeout = 90_000)]
     public async Task Watch_ShutdownDuringPendingDebounce_LeavesStateFileClean()
     {
         var workingDirectory = CopyFixture("MultiProject");

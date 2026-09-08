@@ -1,6 +1,9 @@
   [mcp_servers.rider]
     url = "http://127.0.0.1:64482/stream"
 
+[mcp_servers.rider.tools.get_file_problems]
+approval_mode = "approve"
+
 [sandbox_workspace_write]
 network_access = true
 

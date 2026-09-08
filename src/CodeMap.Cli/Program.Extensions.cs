@@ -363,11 +363,9 @@ public static partial class Program
         var indexer = new IncrementalCodeMapIndexer();
         var updateGate = new SemaphoreSlim(1, 1);
         var pendingFullUpdate = 0;
-        Console.WriteLine($"Watching {root} (debounce {debounceMs}ms). Press Ctrl+C to stop.");
         using var watcher = new FileSystemWatcher(root)
         {
             IncludeSubdirectories = true,
-            EnableRaisingEvents = true,
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size
         };
         var debounceGate = new object();
@@ -440,6 +438,8 @@ public static partial class Program
             Interlocked.Exchange(ref pendingFullUpdate, 1);
             ScheduleUpdate();
         };
+        watcher.EnableRaisingEvents = true;
+        Console.WriteLine($"Watching {root} (debounce {debounceMs}ms). Press Ctrl+C to stop.");
         try
         {
             await Task.Delay(Timeout.Infinite, ShutdownToken);
