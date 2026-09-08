@@ -51,6 +51,8 @@ internal static class WebScriptAstAnalyzer
 
     internal sealed record ScriptJsx(string Name, int StartIndex, int EndIndex, int EnclosingStartIndex, int EnclosingEndIndex);
 
+    internal sealed record ScriptHttpLiteral(string Route, int StartIndex, int EndIndex);
+
     internal sealed record ScriptSelectorQuery(string Selector, int StartIndex, int EndIndex, int EnclosingStartIndex, int EnclosingEndIndex);
 
     internal sealed record ScriptAnalysis(
@@ -59,7 +61,8 @@ internal static class WebScriptAstAnalyzer
         IReadOnlyList<ScriptExport> Exports,
         IReadOnlyList<ScriptCall> Calls,
         IReadOnlyList<ScriptSelectorQuery> SelectorQueries,
-        IReadOnlyList<ScriptJsx> JsxElements);
+        IReadOnlyList<ScriptJsx> JsxElements,
+        IReadOnlyList<ScriptHttpLiteral> HttpLiterals);
 
     internal static ScriptAnalysis Analyze(string content, string language, string? filePath = null)
     {
@@ -77,8 +80,9 @@ internal static class WebScriptAstAnalyzer
             var calls = new List<ScriptCall>();
             var selectors = new List<ScriptSelectorQuery>();
             var jsx = new List<ScriptJsx>();
-            Walk(tree.RootNode, content, symbols, imports, exports, calls, selectors, jsx, enclosing: null);
-            return new ScriptAnalysis(symbols, imports, exports, calls, selectors, jsx);
+            var httpLiterals = new List<ScriptHttpLiteral>();
+            Walk(tree.RootNode, content, symbols, imports, exports, calls, selectors, jsx, httpLiterals, enclosing: null);
+            return new ScriptAnalysis(symbols, imports, exports, calls, selectors, jsx, httpLiterals);
         }
         catch
         {
@@ -86,7 +90,7 @@ internal static class WebScriptAstAnalyzer
         }
     }
 
-    private static readonly ScriptAnalysis Empty = new([], [], [], [], [], []);
+    private static readonly ScriptAnalysis Empty = new([], [], [], [], [], [], []);
 
     private static Language CreateLanguage(string language, string? filePath)
     {
@@ -109,6 +113,7 @@ internal static class WebScriptAstAnalyzer
         List<ScriptCall> calls,
         List<ScriptSelectorQuery> selectors,
         List<ScriptJsx> jsx,
+        List<ScriptHttpLiteral> httpLiterals,
         (int Start, int End)? enclosing)
     {
         var currentEnclosing = enclosing;
@@ -194,7 +199,7 @@ internal static class WebScriptAstAnalyzer
             {
                 var opening = node.NamedChildren.FirstOrDefault(child => child.Type is "jsx_opening_element" or "jsx_self_closing_element");
                 if (opening is not null)
-                    Walk(opening, content, symbols, imports, exports, calls, selectors, jsx, currentEnclosing);
+                    Walk(opening, content, symbols, imports, exports, calls, selectors, jsx, httpLiterals, currentEnclosing);
                 break;
             }
             case "jsx_opening_element":
@@ -214,6 +219,7 @@ internal static class WebScriptAstAnalyzer
             }
             case "call_expression":
             {
+                TryExtractHttpLiteral(node, content, httpLiterals);
                 var functionNode = node.GetChildForField("function");
                 if (functionNode is not null)
                 {
@@ -249,9 +255,8 @@ internal static class WebScriptAstAnalyzer
                                     }
                                 }
                             }
-                            else if (objectNode is not null && objectNode.Type == "identifier")
+                            else if (objectNode is not null && TryGetMemberQualifier(objectNode, content, out var qualifier))
                             {
-                                var qualifier = Slice(content, objectNode.StartIndex, objectNode.EndIndex);
                                 var enc = currentEnclosing ?? (node.StartIndex, node.EndIndex);
                                 calls.Add(new ScriptCall(method, qualifier, node.StartIndex, node.EndIndex, enc.Start, enc.End));
                             }
@@ -263,7 +268,7 @@ internal static class WebScriptAstAnalyzer
         }
 
         foreach (var child in node.NamedChildren)
-            Walk(child, content, symbols, imports, exports, calls, selectors, jsx, currentEnclosing);
+            Walk(child, content, symbols, imports, exports, calls, selectors, jsx, httpLiterals, currentEnclosing);
     }
 
     private static bool IsDefaultExport(Node exportStatement)
@@ -443,6 +448,45 @@ internal static class WebScriptAstAnalyzer
 
     private static bool IsIgnoredCall(string name) =>
         name is "if" or "for" or "while" or "switch" or "catch" or "function" or "require";
+
+    private static void TryExtractHttpLiteral(Node callExpression, string content, List<ScriptHttpLiteral> literals)
+    {
+        var functionNode = callExpression.GetChildForField("function");
+        var propertyNode = functionNode?.Type == "member_expression" ? functionNode.GetChildForField("property") : null;
+        var method = functionNode?.Type == "identifier"
+            ? Slice(content, functionNode.StartIndex, functionNode.EndIndex)
+            : propertyNode is null ? string.Empty : Slice(content, propertyNode.StartIndex, propertyNode.EndIndex);
+        if (method is not ("fetch" or "get" or "post" or "put" or "patch" or "delete" or "request"))
+            return;
+        var argumentsNode = callExpression.GetChildForField("arguments");
+        var argument = argumentsNode?.NamedChildren.FirstOrDefault();
+        if (argument is null || argument.Type is not ("string" or "template_string"))
+            return;
+        var route = Unquote(Slice(content, argument.StartIndex, argument.EndIndex));
+        if (string.IsNullOrWhiteSpace(route) || route.Contains("${", StringComparison.Ordinal))
+            return;
+        if (!route.StartsWith("/", StringComparison.Ordinal) && !Uri.TryCreate(route, UriKind.Absolute, out _))
+            return;
+        literals.Add(new ScriptHttpLiteral(route, callExpression.StartIndex, callExpression.EndIndex));
+    }
+
+    private static bool TryGetMemberQualifier(Node node, string content, out string qualifier)
+    {
+        qualifier = string.Empty;
+        if (node.Type == "identifier")
+        {
+            qualifier = Slice(content, node.StartIndex, node.EndIndex);
+            return true;
+        }
+        if (node.Type != "member_expression")
+            return false;
+        var objectNode = node.GetChildForField("object");
+        var propertyNode = node.GetChildForField("property");
+        if (objectNode is null || propertyNode is null || !TryGetMemberQualifier(objectNode, content, out var parent))
+            return false;
+        qualifier = $"{parent}.{Slice(content, propertyNode.StartIndex, propertyNode.EndIndex)}";
+        return true;
+    }
 
     private static string Slice(string content, int start, int end) =>
         content[Math.Clamp(start, 0, content.Length)..Math.Clamp(end, 0, content.Length)];

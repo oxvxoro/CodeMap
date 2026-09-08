@@ -53,6 +53,10 @@ public sealed class PublicSurfaceFingerprintTests
             var updated = await indexer.UpdateAsync(workingDirectory, CancellationToken.None);
             Assert.Contains("ProjB", updated.AnalyzedProjects);
             Assert.DoesNotContain("ProjA", updated.AnalyzedProjects);
+            Assert.Contains(updated.SkippedPropagationNotes, note =>
+                note.Contains("ProjB", StringComparison.Ordinal)
+                && note.Contains("ProjA", StringComparison.Ordinal)
+                && note.Contains("fingerprint unchanged", StringComparison.Ordinal));
 
             var databasePath = Path.Combine(workingDirectory, ".codemap", "index.db");
             var graph = await new CodeMapQueryStore(databasePath).LoadAsync();

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codemap.dev/schemas/lsp-json-v1.schema.json",
+  "title": "CodeMap LSP JSON-line v1",
+  "type": "object",
+  "required": ["version"],
+  "properties": {
+    "version": { "const": 1 },
+    "matches": { "type": "array" },
+    "relations": { "type": "array" },
+    "stale": { "type": "boolean" },
+    "reason": { "enum": ["no_matches", "ambiguous", null] },
+    "query": { "type": "string" },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

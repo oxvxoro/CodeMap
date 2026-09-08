@@ -63,6 +63,7 @@ public static partial class Program
         AddDiffCommand(rootCommand);
         AddCheckCommand(rootCommand);
         AddWatchCommand(rootCommand);
+        AddStatusCommand(rootCommand);
         AddReportCommand(rootCommand);
         AddMcpCommand(rootCommand);
         AddLspCommand(rootCommand);
@@ -420,7 +421,7 @@ public static partial class Program
         }
         try
         {
-            var databasePath = FindDatabase(root);
+            var databasePath = CodeMapIndexLocator.FindDatabase(root);
             var projectRoot = Path.GetDirectoryName(Path.GetDirectoryName(databasePath))!;
             var result = await new CodeMapSemanticSliceService().SliceAsync(projectRoot,
                 new SemanticSliceRequest(parsedDirection, line, column, maxResults, query, includeSource), ShutdownToken);
@@ -735,10 +736,13 @@ public static partial class Program
 
     private static async Task<(CodeMapQueryService Service, bool Stale)> LoadQueryServiceAsync(string? root, CodeMapMcpContext? freshnessCache = null)
     {
-        var databasePath = FindDatabase(root);
+        var databasePath = CodeMapIndexLocator.FindDatabase(root);
         var store = new CodeMapQueryStore(databasePath);
         var connectionTask = store.OpenReadOnlyConnectionAsync();
-        var staleTask = freshnessCache is null ? IsStaleAsync(databasePath) : IsStaleAsync(databasePath, freshnessCache);
+        var staleTask = CodeMapIndexLocator.IsStaleAsync(
+            databasePath,
+            ShutdownToken,
+            freshnessCache is null ? null : new Func<string, CancellationToken, Task<bool>>(freshnessCache.IsUpToDateAsync));
         try
         {
             await Task.WhenAll(connectionTask, staleTask);
@@ -754,10 +758,13 @@ public static partial class Program
 
     private static async Task<(CodeMapSnapshot Graph, CodeMapQueryService Service, bool Stale)> LoadMapSnapshotAsync(string? root, CodeMapMcpContext? freshnessCache = null)
     {
-        var databasePath = FindDatabase(root);
+        var databasePath = CodeMapIndexLocator.FindDatabase(root);
         var store = new CodeMapQueryStore(databasePath);
         var graphTask = store.LoadAsync();
-        var staleTask = freshnessCache is null ? IsStaleAsync(databasePath) : IsStaleAsync(databasePath, freshnessCache);
+        var staleTask = CodeMapIndexLocator.IsStaleAsync(
+            databasePath,
+            ShutdownToken,
+            freshnessCache is null ? null : new Func<string, CancellationToken, Task<bool>>(freshnessCache.IsUpToDateAsync));
         await Task.WhenAll(graphTask, staleTask);
         var graph = graphTask.Result;
         return (graph, new CodeMapQueryService(graph), staleTask.Result);
@@ -765,60 +772,12 @@ public static partial class Program
 
     private static async Task<(CodeMapSnapshot Graph, CodeMapQueryService Service, bool Stale)> LoadMapProjectScopedAsync(string? root, string project)
     {
-        var databasePath = FindDatabase(root);
+        var databasePath = CodeMapIndexLocator.FindDatabase(root);
         var graphTask = new CodeMapQueryStore(databasePath).LoadProjectScopedAsync(project, ShutdownToken);
-        var staleTask = IsStaleAsync(databasePath);
+        var staleTask = CodeMapIndexLocator.IsStaleAsync(databasePath, ShutdownToken);
         await Task.WhenAll(graphTask, staleTask);
         var graph = graphTask.Result;
         return (graph, new CodeMapQueryService(graph), staleTask.Result);
-    }
-
-    private static async Task<bool> IsStaleAsync(string databasePath)
-    {
-
-
-
-
-
-
-        try
-        {
-            var projectRoot = Path.GetDirectoryName(Path.GetDirectoryName(databasePath))!;
-            return !await new IncrementalCodeMapIndexer().IsUpToDateAsync(projectRoot, ShutdownToken);
-        }
-        catch (OperationCanceledException) when (ShutdownToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            return true;
-        }
-    }
-
-
-
-
-
-
-
-
-
-    private static async Task<bool> IsStaleAsync(string databasePath, CodeMapMcpContext freshnessCache)
-    {
-        try
-        {
-            var projectRoot = Path.GetDirectoryName(Path.GetDirectoryName(databasePath))!;
-            return !await freshnessCache.IsUpToDateAsync(projectRoot, ShutdownToken);
-        }
-        catch (OperationCanceledException) when (ShutdownToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            return true;
-        }
     }
 
     private static void WarnIfStale(bool stale)
@@ -827,43 +786,14 @@ public static partial class Program
             Console.Error.WriteLine("warning: index may be stale (files changed since the last index/update).\nRun: codemap update");
     }
 
-    private static string FindDatabase(string? root)
-    {
-        var start = string.IsNullOrWhiteSpace(root) ? Directory.GetCurrentDirectory() : Path.GetFullPath(root);
-        if (File.Exists(start)) start = Path.GetDirectoryName(start)!;
-        var directory = new DirectoryInfo(start);
-        while (directory is not null)
-        {
-            var candidate = Path.Combine(directory.FullName, ".codemap", "index.db");
-            if (File.Exists(candidate)) return candidate;
-            directory = directory.Parent!;
-        }
-        throw new FileNotFoundException("No CodeMap index found.\nRun: codemap index");
-    }
-
     private static int HandleQueryError(Exception exception, bool json, bool evidence = false, int? version = null)
     {
-        var (code, message) = ClassifyError(exception);
+        var (code, message) = CodeMapErrorClassifier.Classify(exception);
         if (json)
             WriteJson(new ErrorResponse(version ?? SchemaVersion(evidence), new ErrorDto(code, message)));
         else
             Console.Error.WriteLine(message);
         return Exit(1);
-    }
-
-    private static (string Code, string Message) ClassifyError(Exception exception)
-    {
-        if (exception is FileNotFoundException && exception.Message.Contains("No CodeMap index found", StringComparison.Ordinal))
-            return ("index_not_found", "No CodeMap index found.\nRun: codemap index");
-        if (exception is IndexBuildingException building)
-            return ("index_building", building.Message);
-        if (exception is InvalidOperationException && exception.Message.Contains("CodeMap index schema is outdated", StringComparison.Ordinal))
-            return ("schema_outdated", exception.Message);
-        if (exception is GitUnavailableException git)
-            return ("git_unavailable", git.Message);
-        if (exception is SemanticSliceException slice)
-            return (slice.Code, slice.Message);
-        return ("query_failed", $"codemap query failed: {exception.Message}");
     }
 
     private static int Exit(int code)

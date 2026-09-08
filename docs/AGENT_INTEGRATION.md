@@ -772,12 +772,29 @@ codemap lsp
 { "command":"impact", "query":"...", "profile":"code" }
 ```
 
+모든 LSP 응답은 `version: 1`을 포함한다. `evidence: false`를 요청하면 관계의
+위치·증거 문자열을 생략할 수 있다. 결과가 없으면 `reason: "no_matches"`,
+모호하면 `reason: "ambiguous"`와 함께 구조화된 `error`를 반환한다.
+
+기계 판독용 LSP 스키마:
+
+* [lsp-json-v1.schema.json](lsp-json-v1.schema.json)
+
 기계 판독용 스키마:
 
 * [cli-json-v2.schema.json](cli-json-v2.schema.json) — 과거 evidence 없는 계약
 * [cli-json-v3.schema.json](cli-json-v3.schema.json) — 과거 evidence 계약
 * [cli-json-v4.schema.json](cli-json-v4.schema.json) — 현재 evidence 없는 CLI 출력
 * [cli-json-v5.schema.json](cli-json-v5.schema.json) — 현재 evidence CLI 출력
+
+### 11.4 인덱스 상태
+
+```bash
+codemap status [path] [--json] [--check-freshness]
+```
+
+상태 조회는 인덱스 파일을 변경하지 않으며, 상태·스키마·분석기 버전·심볼/엣지
+개수를 반환한다. `--check-freshness`를 지정하면 파일 변경 여부도 확인한다.
 
 ---
 

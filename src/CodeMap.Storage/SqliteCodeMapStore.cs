@@ -29,8 +29,13 @@ public sealed record IndexSummary(
 {
     public IReadOnlyList<string> AnalyzedProjects { get; init; } = AnalyzedProjects ?? Array.Empty<string>();
 
+    public IReadOnlyList<string> SkippedPropagationNotes { get; init; } = Array.Empty<string>();
+
     public override string ToString() =>
-        $"Indexed {IndexedFiles} files\nAdded: {Added}\nUpdated: {Updated}\nRemoved: {Removed}\nSkipped: {Skipped}\nSymbols: {Symbols}\nEdges: {Edges}\nElapsed: {Elapsed.TotalMilliseconds:0} ms";
+        $"Indexed {IndexedFiles} files\nAdded: {Added}\nUpdated: {Updated}\nRemoved: {Removed}\nSkipped: {Skipped}\nSymbols: {Symbols}\nEdges: {Edges}\nElapsed: {Elapsed.TotalMilliseconds:0} ms"
+        + (SkippedPropagationNotes.Count == 0
+            ? string.Empty
+            : $"\nFingerprint propagation skips:\n{string.Join('\n', SkippedPropagationNotes.Select(note => $"- {note}"))}");
 }
 
 

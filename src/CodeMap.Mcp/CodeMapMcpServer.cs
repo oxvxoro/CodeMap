@@ -472,14 +472,50 @@ public static class CodeMapTools
         return summary.ToString();
     }
 
+    [McpServerTool, Description("Read CodeMap index metadata and counts without modifying the index.")]
+    public static async Task<string> GetStatus(
+        CodeMapMcpContext context,
+        string? root = null,
+        bool checkFreshness = false,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var databasePath = CodeMapIndexLocator.FindDatabase(ResolveRoot(context, root));
+            var status = await CodeMapIndexStatusReader.ReadAsync(databasePath, cancellationToken);
+            bool? stale = checkFreshness
+                ? await CodeMapIndexLocator.IsStaleAsync(databasePath, cancellationToken, context.IsUpToDateAsync)
+                : null;
+            return JsonSerializer.Serialize(new
+            {
+                version = 1,
+                indexState = status.IndexState,
+                lastIndexedAtUtc = status.LastIndexedAtUtc,
+                schemaVersion = status.SchemaVersion,
+                schemaOutdated = status.SchemaOutdated,
+                analyzerVersions = status.AnalyzerVersions,
+                analyzerVersionsOutdated = status.AnalyzerVersionsOutdated,
+                symbols = status.Symbols,
+                edges = status.Edges,
+                freshnessChecked = checkFreshness,
+                stale
+            });
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            var (code, message) = CodeMapErrorClassifier.Classify(exception);
+            return JsonSerializer.Serialize(new { version = 1, error = new { code, message } });
+        }
+    }
+
     private static string ResolveRoot(CodeMapMcpContext context, string? root) =>
         string.IsNullOrWhiteSpace(root) ? context.DefaultRoot : Path.GetFullPath(root);
 
 
     private static string ResolveIndexRoot(string queryRoot)
     {
-        var databasePath = FindDatabase(queryRoot);
-        return Path.GetDirectoryName(Path.GetDirectoryName(databasePath))!;
+        var databasePath = CodeMapIndexLocator.FindDatabase(queryRoot);
+        return CodeMapIndexLocator.ResolveIndexRoot(databasePath);
     }
 
     private sealed record OpenServiceResult(CodeMapQueryService? Service, bool Stale, IndexBuildingException? Error = null);
@@ -489,26 +525,22 @@ public static class CodeMapTools
 
     private static async Task<OpenServiceResult> OpenServiceAsync(CodeMapMcpContext context, string? root, CancellationToken cancellationToken)
     {
-        var databasePath = FindDatabase(ResolveRoot(context, root));
+        var databasePath = CodeMapIndexLocator.FindDatabase(ResolveRoot(context, root));
         var store = new CodeMapQueryStore(databasePath);
         var connectionTask = store.OpenReadOnlyConnectionAsync(cancellationToken);
-        var staleTask = context.IsUpToDateAsync(Path.GetDirectoryName(Path.GetDirectoryName(databasePath))!, cancellationToken);
+        var staleTask = CodeMapIndexLocator.IsStaleAsync(databasePath, cancellationToken, context.IsUpToDateAsync);
         try
         {
             var connection = await connectionTask;
             try
             {
-                var upToDate = await staleTask;
-                return new OpenServiceResult(new CodeMapQueryService(connection), !upToDate);
+                var stale = await staleTask;
+                return new OpenServiceResult(new CodeMapQueryService(connection), stale);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 await connection.DisposeAsync();
                 throw;
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                return new OpenServiceResult(new CodeMapQueryService(connection), Stale: true);
             }
             catch
             {
@@ -533,15 +565,4 @@ public static class CodeMapTools
         }
     }
 
-    private static string FindDatabase(string root)
-    {
-        var directory = new DirectoryInfo(Path.GetFullPath(root));
-        while (directory is not null)
-        {
-            var candidate = Path.Combine(directory.FullName, ".codemap", "index.db");
-            if (File.Exists(candidate)) return candidate;
-            directory = directory.Parent!;
-        }
-        throw new FileNotFoundException("No CodeMap index found. Run: codemap index");
-    }
 }

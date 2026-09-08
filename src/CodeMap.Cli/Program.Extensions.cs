@@ -118,6 +118,73 @@ public static partial class Program
         root.AddCommand(command);
     }
 
+    private static void AddStatusCommand(RootCommand root)
+    {
+        var path = new Argument<string>("path", () => Directory.GetCurrentDirectory(), "Repository, solution, project, or index path.")
+        {
+            Arity = ArgumentArity.ZeroOrOne
+        };
+        var json = new Option<bool>("--json", "Emit stable JSON instead of compact text.");
+        var checkFreshness = new Option<bool>("--check-freshness", "Recompute file freshness in addition to reading metadata.");
+        var command = new Command("status", "Show the current CodeMap index status without modifying it.");
+        command.AddArgument(path);
+        command.AddOption(json);
+        command.AddOption(checkFreshness);
+        command.SetHandler(async (string statusPath, bool jsonValue, bool checkFreshnessValue) =>
+            await RunStatusAsync(statusPath, jsonValue, checkFreshnessValue), path, json, checkFreshness);
+        root.AddCommand(command);
+    }
+
+    private static async Task<int> RunStatusAsync(string path, bool json, bool checkFreshness)
+    {
+        try
+        {
+            var databasePath = CodeMapIndexLocator.FindDatabase(path);
+            var status = await CodeMapIndexStatusReader.ReadAsync(databasePath, ShutdownToken);
+            bool? stale = checkFreshness
+                ? await CodeMapIndexLocator.IsStaleAsync(databasePath, ShutdownToken)
+                : null;
+            if (json)
+            {
+                WriteJson(new
+                {
+                    version = 1,
+                    status.IndexState,
+                    status.LastIndexedAtUtc,
+                    status.SchemaVersion,
+                    status.SchemaOutdated,
+                    status.AnalyzerVersions,
+                    status.AnalyzerVersionsOutdated,
+                    status.Symbols,
+                    status.Edges,
+                    freshnessChecked = checkFreshness,
+                    stale
+                });
+            }
+            else
+            {
+                Console.WriteLine($"State: {status.IndexState}");
+                Console.WriteLine($"Last indexed (UTC): {status.LastIndexedAtUtc?.ToString("O") ?? "never"}");
+                Console.WriteLine($"Schema: {status.SchemaVersion ?? "missing"} ({(status.SchemaOutdated ? "outdated" : "current")})");
+                Console.WriteLine($"Analyzers: {(status.AnalyzerVersionsOutdated ? "outdated" : "current")}");
+                Console.WriteLine($"Symbols: {status.Symbols}");
+                Console.WriteLine($"Edges: {status.Edges}");
+                if (stale is not null)
+                    Console.WriteLine($"Freshness: {(stale.Value ? "stale" : "current")}");
+            }
+            return Exit(0);
+        }
+        catch (OperationCanceledException) when (ShutdownToken.IsCancellationRequested)
+        {
+            Console.Error.WriteLine("codemap status canceled.");
+            return Exit(130);
+        }
+        catch (Exception exception)
+        {
+            return HandleQueryError(exception, json, version: 1);
+        }
+    }
+
     private static void AddReportCommand(RootCommand root)
     {
         var output = new Option<string>("--out", "Write an HTML report to this path.") { IsRequired = true };
@@ -362,7 +429,7 @@ public static partial class Program
         var root = Path.GetFullPath(path);
         var indexer = new IncrementalCodeMapIndexer();
         var updateGate = new SemaphoreSlim(1, 1);
-        var pendingFullUpdate = 0;
+        var pendingRecoveryUpdate = 0;
         using var watcher = new FileSystemWatcher(root)
         {
             IncludeSubdirectories = true,
@@ -371,21 +438,19 @@ public static partial class Program
         var debounceGate = new object();
         CancellationTokenSource? activeDebounce = null;
         var stopping = false;
-        async Task RunUpdateAsync(bool fullScan)
+        async Task RunUpdateAsync()
         {
             await updateGate.WaitAsync(ShutdownToken);
             try
             {
-                var summary = fullScan
-                    ? await indexer.UpdateAsync(root, ShutdownToken)
-                    : await indexer.UpdateAsync(root, ShutdownToken);
+                var summary = await indexer.UpdateAsync(root, ShutdownToken);
                 Console.WriteLine($"{DateTimeOffset.Now:u} {summary}");
             }
             finally
             {
                 updateGate.Release();
-                if (Interlocked.Exchange(ref pendingFullUpdate, 0) == 1)
-                    _ = Task.Run(() => RunUpdateAsync(fullScan: true), ShutdownToken);
+                if (Interlocked.Exchange(ref pendingRecoveryUpdate, 0) == 1)
+                    _ = Task.Run(RunUpdateAsync, ShutdownToken);
             }
         }
         void ScheduleUpdate()
@@ -406,7 +471,7 @@ public static partial class Program
                 try
                 {
                     await Task.Delay(Math.Max(100, debounceMs), debounce.Token);
-                    await RunUpdateAsync(fullScan: false);
+                    await RunUpdateAsync();
                 }
                 catch (OperationCanceledException) { }
                 catch (Exception exception)
@@ -435,7 +500,7 @@ public static partial class Program
         watcher.Error += (_, eventArgs) =>
         {
             Console.Error.WriteLine($"watch error: {eventArgs.GetException().Message}");
-            Interlocked.Exchange(ref pendingFullUpdate, 1);
+            Interlocked.Exchange(ref pendingRecoveryUpdate, 1);
             ScheduleUpdate();
         };
         watcher.EnableRaisingEvents = true;
@@ -542,6 +607,8 @@ public static partial class Program
                 using var document = JsonDocument.Parse(line);
                 var command = document.RootElement.GetProperty("command").GetString() ?? "";
                 var queryRoot = document.RootElement.TryGetProperty("root", out var rootElement) ? rootElement.GetString() : defaultRoot;
+                var evidence = !document.RootElement.TryGetProperty("evidence", out var evidenceElement)
+                    || evidenceElement.GetBoolean();
                 var response = command switch
                 {
                     "find" => await LspFindAsync(document.RootElement.GetProperty("query").GetString()!, queryRoot, freshnessCache),
@@ -549,28 +616,31 @@ public static partial class Program
                         document.RootElement.GetProperty("query").GetString()!,
                         queryRoot,
                         freshnessCache,
-                        document.RootElement.TryGetProperty("profile", out var impactProfileElement) ? impactProfileElement.GetString() ?? "code" : "code"),
+                        document.RootElement.TryGetProperty("profile", out var impactProfileElement) ? impactProfileElement.GetString() ?? "code" : "code",
+                        evidence),
                     "context" => await LspContextAsync(document.RootElement.GetProperty("task").GetString()!, queryRoot, freshnessCache),
                     "relation" => await LspRelationAsync(
                         document.RootElement.GetProperty("source").GetString()!,
                         document.RootElement.GetProperty("target").GetString()!,
                         queryRoot,
                         freshnessCache,
-                        document.RootElement.TryGetProperty("minConfidence", out var minConfidenceElement) ? minConfidenceElement.GetDouble() : 0),
+                        document.RootElement.TryGetProperty("minConfidence", out var minConfidenceElement) ? minConfidenceElement.GetDouble() : 0,
+                        evidence),
                     "flow" => await LspFlowAsync(
                         document.RootElement.GetProperty("entry").GetString()!,
                         document.RootElement.TryGetProperty("kind", out var kindElement) ? kindElement.GetString() ?? "all" : "all",
                         document.RootElement.TryGetProperty("depth", out var depthElement) ? depthElement.GetInt32() : CodeMapQueryService.FlowDefaultDepth,
                         queryRoot,
                         freshnessCache,
-                        document.RootElement.TryGetProperty("minConfidence", out var flowMinConfidenceElement) ? flowMinConfidenceElement.GetDouble() : 0),
-                    _ => new { error = $"unknown command '{command}'" }
+                        document.RootElement.TryGetProperty("minConfidence", out var flowMinConfidenceElement) ? flowMinConfidenceElement.GetDouble() : 0,
+                        evidence),
+                    _ => LspError("unknown_command", $"unknown command '{command}'")
                 };
                 Console.WriteLine(JsonSerializer.Serialize(response, JsonOptions));
             }
             catch (Exception exception)
             {
-                Console.WriteLine(JsonSerializer.Serialize(new { error = exception.Message }, JsonOptions));
+                Console.WriteLine(JsonSerializer.Serialize(LspError("query_failed", exception.Message), JsonOptions));
             }
         }
         return Exit(0);
@@ -580,91 +650,91 @@ public static partial class Program
     {
         var loaded = await LoadQueryServiceAsync(root, freshnessCache);
         await using var service = loaded.Service;
-        return new { matches = service.Find(query, 20).Select(ToMatch).ToArray(), stale = loaded.Stale };
+        var matches = service.Find(query, 20).Select(ToMatch).ToArray();
+        return new { version = 1, matches, relations = Array.Empty<QueryRelation>(), stale = loaded.Stale, reason = matches.Length == 0 ? "no_matches" : (string?)null };
     }
 
-    private static async Task<object> LspImpactAsync(string query, string? root, CodeMapMcpContext freshnessCache, string profile = "code")
+    private static async Task<object> LspImpactAsync(string query, string? root, CodeMapMcpContext freshnessCache, string profile = "code", bool evidence = true)
     {
         if (!CodeMapQueryService.IsValidImpactProfile(profile))
-            return new { error = new { code = "query_failed", message = "profile must be one of: code, app." } };
+            return LspError("query_failed", "profile must be one of: code, app.");
         var loaded = await LoadQueryServiceAsync(root, freshnessCache);
         await using var service = loaded.Service;
         var resolution = service.ResolveSymbol(query, callableOnly: false, 20);
-        if (resolution.Matches.Count == 0) return new { matches = Array.Empty<MatchDto>(), relations = Array.Empty<QueryRelation>(), stale = loaded.Stale };
-        if (resolution.Matches.Count > 1) return new { error = "ambiguous", query, stale = loaded.Stale };
+        if (resolution.Matches.Count == 0) return LspNoMatches(query, loaded.Stale);
+        if (resolution.Matches.Count > 1) return LspAmbiguous(query, loaded.Stale);
         var symbol = resolution.Matches[0];
         var impact = service.Impact(symbol, 2, 20, profile);
         return new
         {
+            version = 1,
             matches = new[] { ToMatch(symbol) },
-            relations = impact.Select(item => ToRelation("impact", item.Symbol, symbol, item.Depth, item.Via, service, evidence: true)).ToArray(),
-            stale = loaded.Stale
+            relations = impact.Select(item => ToRelation("impact", item.Symbol, symbol, item.Depth, item.Via, service, evidence)).ToArray(),
+            stale = loaded.Stale,
+            reason = (string?)null
         };
     }
 
-    private static async Task<object> LspRelationAsync(string source, string target, string? root, CodeMapMcpContext freshnessCache, double minConfidence)
+    private static async Task<object> LspRelationAsync(string source, string target, string? root, CodeMapMcpContext freshnessCache, double minConfidence, bool evidence = true)
     {
         if (!RelationConfidence.IsValid(minConfidence))
-            return new
-            {
-                error = new
-                {
-                    code = "query_failed",
-                    message = RelationConfidence.InvalidMessage
-                }
-            };
+            return LspError("query_failed", RelationConfidence.InvalidMessage);
 
         var loaded = await LoadQueryServiceAsync(root, freshnessCache);
         await using var service = loaded.Service;
         var sourceResolution = service.ResolveSymbol(source, callableOnly: false, 20);
         if (sourceResolution.Matches.Count == 0)
-            return new { matches = Array.Empty<MatchDto>(), relations = Array.Empty<QueryRelation>(), stale = loaded.Stale };
+            return LspNoMatches(source, loaded.Stale);
         if (sourceResolution.Matches.Count > 1)
-            return new { error = "ambiguous", query = source, stale = loaded.Stale };
+            return LspAmbiguous(source, loaded.Stale);
         var sourceSymbol = sourceResolution.Matches[0];
 
         var targetResolution = service.ResolveSymbol(target, callableOnly: false, 20);
         if (targetResolution.Matches.Count == 0)
-            return new { matches = Array.Empty<MatchDto>(), relations = Array.Empty<QueryRelation>(), stale = loaded.Stale };
+            return LspNoMatches(target, loaded.Stale);
         if (targetResolution.Matches.Count > 1)
-            return new { error = "ambiguous", query = target, stale = loaded.Stale };
+            return LspAmbiguous(target, loaded.Stale);
         var targetSymbol = targetResolution.Matches[0];
         var relations = service.Relations(sourceSymbol.Id, targetSymbol.Id, edgeKind: null, maxResults: 20, minConfidence)
-            .Select(item => ToRelation("relation", item.Source, item.Target, null, item.Edge, service, evidence: true, item.Evidence))
+            .Select(item => ToRelation("relation", item.Source, item.Target, null, item.Edge, service, evidence, item.Evidence))
             .ToArray();
         return new
         {
+            version = 1,
             matches = new[] { ToMatch(sourceSymbol), ToMatch(targetSymbol) },
             relations,
-            stale = loaded.Stale
+            stale = loaded.Stale,
+            reason = relations.Length == 0 ? "no_matches" : (string?)null
         };
     }
 
-    private static async Task<object> LspFlowAsync(string entry, string kind, int depth, string? root, CodeMapMcpContext freshnessCache, double minConfidence)
+    private static async Task<object> LspFlowAsync(string entry, string kind, int depth, string? root, CodeMapMcpContext freshnessCache, double minConfidence, bool evidence = true)
     {
         if (!RelationConfidence.IsValid(minConfidence))
-            return new { error = new { code = "query_failed", message = RelationConfidence.InvalidMessage } };
+            return LspError("query_failed", RelationConfidence.InvalidMessage);
         if (!CodeMapQueryService.IsValidFlowKind(kind))
-            return new { error = new { code = "query_failed", message = "kind must be one of: http, ui, all." } };
+            return LspError("query_failed", "kind must be one of: http, ui, all.");
         if (!CodeMapQueryService.IsValidFlowDepth(depth))
-            return new { error = new { code = "query_failed", message = $"depth must be between {CodeMapQueryService.FlowMinDepth} and {CodeMapQueryService.FlowMaxDepth}." } };
+            return LspError("query_failed", $"depth must be between {CodeMapQueryService.FlowMinDepth} and {CodeMapQueryService.FlowMaxDepth}.");
 
         var loaded = await LoadQueryServiceAsync(root, freshnessCache);
         await using var service = loaded.Service;
         var resolution = service.ResolveSymbol(entry, callableOnly: false, 20);
         if (resolution.Matches.Count == 0)
-            return new { matches = Array.Empty<MatchDto>(), relations = Array.Empty<QueryRelation>(), stale = loaded.Stale };
+            return LspNoMatches(entry, loaded.Stale);
         if (resolution.Matches.Count > 1)
-            return new { error = "ambiguous", query = entry, stale = loaded.Stale };
+            return LspAmbiguous(entry, loaded.Stale);
         var entrySymbol = resolution.Matches[0];
         var flow = service.Flow(entrySymbol, kind, depth, 20, minConfidence);
         var sourceById = service.FindByIds(flow.Select(item => item.Via.SourceId));
         var fileById = service.FindFilesByIds(flow.Select(item => item.Via.SourceFileId).OfType<string>());
         return new
         {
+            version = 1,
             matches = new[] { ToMatch(entrySymbol) },
-            relations = flow.Select(item => ToFlowRelation(item, entrySymbol, sourceById, service, evidence: true, fileById)).ToArray(),
-            stale = loaded.Stale
+            relations = flow.Select(item => ToFlowRelation(item, entrySymbol, sourceById, service, evidence, fileById)).ToArray(),
+            stale = loaded.Stale,
+            reason = flow.Count == 0 ? "no_matches" : (string?)null
         };
     }
 
@@ -676,13 +746,29 @@ public static partial class Program
         await using var service = loaded.Service;
         var matches = service.Find(task, 5);
         var map = service.BuildMap(matches.FirstOrDefault()?.Name ?? task, null, 500);
-        return new { matches = matches.Select(ToMatch).ToArray(), mapLines = map.Lines, stale = loaded.Stale };
+        return new { version = 1, matches = matches.Select(ToMatch).ToArray(), mapLines = map.Lines, stale = loaded.Stale, reason = matches.Count == 0 ? "no_matches" : (string?)null };
     }
+
+    private static object LspError(string code, string message) =>
+        new { version = 1, error = new { code, message } };
+
+    private static object LspNoMatches(string query, bool stale) =>
+        new { version = 1, matches = Array.Empty<MatchDto>(), relations = Array.Empty<QueryRelation>(), query, stale, reason = "no_matches" };
+
+    private static object LspAmbiguous(string query, bool stale) =>
+        new
+        {
+            version = 1,
+            error = new { code = "ambiguous", message = $"query '{query}' resolved to multiple symbols." },
+            query,
+            stale,
+            reason = "ambiguous"
+        };
 
     private static string ProjectRoot(string? root)
     {
-        var databasePath = FindDatabase(root);
-        return Path.GetDirectoryName(Path.GetDirectoryName(databasePath))!;
+        var databasePath = CodeMapIndexLocator.FindDatabase(root);
+        return CodeMapIndexLocator.ResolveIndexRoot(databasePath);
     }
 
     private static string ResolveProjectRoot(string? root) =>

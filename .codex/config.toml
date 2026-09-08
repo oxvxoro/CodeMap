@@ -4,6 +4,18 @@
 [mcp_servers.rider.tools.get_file_problems]
 approval_mode = "approve"
 
+[mcp_servers.rider.tools.findTests]
+approval_mode = "approve"
+
+[mcp_servers.rider.tools.execute_run_configuration]
+approval_mode = "approve"
+
+[mcp_servers.rider.tools.lint_files]
+approval_mode = "approve"
+
+[mcp_servers.rider.tools.apply_patch]
+approval_mode = "approve"
+
 [sandbox_workspace_write]
 network_access = true
 

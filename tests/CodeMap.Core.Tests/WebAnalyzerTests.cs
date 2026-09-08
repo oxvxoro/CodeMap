@@ -216,6 +216,33 @@ public sealed class WebAnalyzerTests
     }
 
     [Fact]
+    public void ScriptAstAnalyzer_ExtractsNestedMemberQualifier()
+    {
+        var analysis = WebScriptAstAnalyzer.Analyze(
+            "import * as api from './api'; function load() { api.users.list(); }",
+            "typescript",
+            "sample.ts");
+
+        var call = Assert.Single(analysis.Calls, item => item.Name == "list");
+        Assert.Equal("api.users", call.Qualifier);
+    }
+
+    [Fact]
+    public async Task IndexesStaticHttpRequestLiteralsWithoutInventingEdges()
+    {
+        var result = await AnalyzeScripts(new Dictionary<string, string>
+        {
+            ["app.ts"] = "export function load() { fetch('/api/users'); client.get(`https://example.test/items`); fetch(`/api/${id}`); }"
+        });
+
+        var routes = result.Nodes.Where(node => node.Kind == NodeKind.Route).ToArray();
+        Assert.Equal(2, routes.Length);
+        Assert.Contains(routes, node => node.Name == "/api/users");
+        Assert.Contains(routes, node => node.Name == "https://example.test/items");
+        Assert.DoesNotContain(result.Edges, edge => edge.TargetId.Contains("http:", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task ResolvesReexportChainWithFixedConfidence()
     {
         var result = await AnalyzeScriptsAt(Path.Combine(Path.GetTempPath(), "codemap-web-reexport-" + Guid.NewGuid()), new Dictionary<string, string>

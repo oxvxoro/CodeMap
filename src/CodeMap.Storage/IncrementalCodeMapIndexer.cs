@@ -129,6 +129,7 @@ public sealed partial class IncrementalCodeMapIndexer
         var changeSummary = await DetectProjectChangesAsync(previousState, root, resolved, cancellationToken);
         var dirtyProjects = new HashSet<string>(changeSummary.DirtyProjects, StringComparer.Ordinal);
         IReadOnlyList<AnalyzedProject> analyzedProjects;
+        var skippedPropagationNotes = new List<string>();
         if (resolved is null)
         {
             analyzedProjects = await AnalyzeAllAsync(root, resolved, csharpProjectNames: null, dirtyProjectNames: dirtyProjects, cancellationToken);
@@ -155,7 +156,7 @@ public sealed partial class IncrementalCodeMapIndexer
                 _lastProjectReferences = firstWaveSeed.ProjectReferences;
             }
             analyzedProjects = await ExpandAndAnalyzeUsingFingerprintsAsync(
-                root, resolved, dirtyProjects, referencing, previousState, cancellationToken, firstWaveSeed);
+                root, resolved, dirtyProjects, referencing, previousState, cancellationToken, firstWaveSeed, skippedPropagationNotes);
         }
 
         var analyzedNames = analyzedProjects.Select(project => project.ProjectName).ToHashSet(StringComparer.Ordinal);
@@ -184,7 +185,10 @@ public sealed partial class IncrementalCodeMapIndexer
             counts.Symbols,
             counts.Edges,
             stopwatch.Elapsed,
-            analyzedProjects.Select(project => project.ProjectName).ToArray());
+            analyzedProjects.Select(project => project.ProjectName).ToArray())
+        {
+            SkippedPropagationNotes = skippedPropagationNotes
+        };
     }
 
 
@@ -307,7 +311,8 @@ public sealed partial class IncrementalCodeMapIndexer
         IReadOnlyDictionary<string, HashSet<string>> referencing,
         IndexStateFile previousState,
         CancellationToken cancellationToken,
-        CSharpWorkspaceAnalysisResult? firstWaveSeed = null)
+        CSharpWorkspaceAnalysisResult? firstWaveSeed = null,
+        ICollection<string>? skippedPropagationNotes = null)
     {
         var previousFingerprints = previousState.Projects
             .ToDictionary(project => project.ProjectName, project => project.PublicSurfaceFingerprint, StringComparer.Ordinal);
@@ -358,7 +363,11 @@ public sealed partial class IncrementalCodeMapIndexer
                     && previousFingerprint is not null
                     && string.Equals(newFingerprint, previousFingerprint, StringComparison.Ordinal);
                 if (surfaceProvablyUnchanged)
+                {
+                    skippedPropagationNotes?.Add(
+                        $"{projectName} -> {string.Join(", ", dependents.OrderBy(dependent => dependent, StringComparer.Ordinal))} (public surface fingerprint unchanged)");
                     continue;
+                }
 
                 foreach (var dependent in dependents)
                     if (!processed.Contains(dependent))

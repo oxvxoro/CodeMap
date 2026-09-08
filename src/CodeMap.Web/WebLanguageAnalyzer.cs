@@ -13,7 +13,7 @@ public sealed class WebLanguageAnalyzer : ILanguageAnalyzer
 
 
 
-    public const string AnalyzerVersion = "6";
+    public const string AnalyzerVersion = "7";
 
     private static readonly HtmlParser HtmlDocumentParser = new();
     private static readonly StylesheetParser CssStylesheetParser = new();
@@ -94,7 +94,7 @@ public sealed class WebLanguageAnalyzer : ILanguageAnalyzer
                 lineStartsByPath[pair.Key] = lineStarts;
                 var ast = WebScriptAstAnalyzer.Analyze(pair.Value, language, pair.Key);
                 astByPath[pair.Key] = ast;
-                if (ast.Symbols.Count > 0 || ast.Imports.Count > 0)
+                if (ast.Symbols.Count > 0 || ast.Imports.Count > 0 || ast.HttpLiterals.Count > 0)
                     ParseScriptFromAst(projectName, relative, pair.Value, lineStarts, language, ast, nodes, nodeIds, functionRanges);
                 else
                 {
@@ -235,6 +235,13 @@ public sealed class WebLanguageAnalyzer : ILanguageAnalyzer
             if (symbol.Kind is NodeKind.Function or NodeKind.Method)
                 ranges.Add((node, symbol.StartIndex, symbol.EndIndex));
         }
+        foreach (var literal in ast.HttpLiterals)
+        {
+            var qualified = $"{relative}::http:{literal.Route}";
+            var id = $"route://{Normalize(project)}/{qualified}";
+            AddNode(MakeNode(id, NodeKind.Route, literal.Route, qualified, relative, language,
+                Location(lineStarts, content, literal.StartIndex, literal.EndIndex - literal.StartIndex)), nodes, ids);
+        }
         functionRanges[relative] = ranges;
     }
 
@@ -290,8 +297,9 @@ public sealed class WebLanguageAnalyzer : ILanguageAnalyzer
                 {
                     ResolvedBinding? resolved = null;
                     EdgeResolutionKind resolution = EdgeResolutionKind.Heuristic;
-                    if (!string.IsNullOrWhiteSpace(call.Qualifier)
-                        && bindingTargets.TryGetValue(call.Qualifier, out var namespaceBinding)
+                    var qualifierRoot = call.Qualifier?.Split('.', 2)[0];
+                    if (!string.IsNullOrWhiteSpace(qualifierRoot)
+                        && bindingTargets.TryGetValue(qualifierRoot, out var namespaceBinding)
                         && namespaceBinding.ModuleRelative is not null
                         && TryResolveExport(exportTable, namespaceBinding.ModuleRelative, call.Name, out var exportNode, out var viaReexport))
                     {

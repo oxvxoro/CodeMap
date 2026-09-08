@@ -475,6 +475,7 @@ public sealed class CliFollowUpTests
 
             Assert.True(output.ExitCode == 0, output.StdErr + output.StdOut);
             using var response = JsonDocument.Parse(output.StdOut.Trim());
+            Assert.Equal(1, response.RootElement.GetProperty("version").GetInt32());
             Assert.True(response.RootElement.GetProperty("matches").GetArrayLength() > 0);
         }
         finally
@@ -529,6 +530,7 @@ public sealed class CliFollowUpTests
                 using var noMatchImpact = await SendLspRequestAsync(process, new { command = "impact", query = "MissingSymbol" });
                 Assert.Equal(0, noMatchImpact.RootElement.GetProperty("matches").GetArrayLength());
                 Assert.Equal(0, noMatchImpact.RootElement.GetProperty("relations").GetArrayLength());
+                Assert.Equal("no_matches", noMatchImpact.RootElement.GetProperty("reason").GetString());
 
 
 
@@ -549,7 +551,9 @@ public sealed class CliFollowUpTests
 
         static void AssertAmbiguous(JsonDocument document, string query)
         {
-            Assert.Equal("ambiguous", document.RootElement.GetProperty("error").GetString());
+            Assert.Equal(1, document.RootElement.GetProperty("version").GetInt32());
+            Assert.Equal("ambiguous", document.RootElement.GetProperty("error").GetProperty("code").GetString());
+            Assert.Equal("ambiguous", document.RootElement.GetProperty("reason").GetString());
             Assert.Equal(query, document.RootElement.GetProperty("query").GetString());
             Assert.True(document.RootElement.TryGetProperty("stale", out _));
         }

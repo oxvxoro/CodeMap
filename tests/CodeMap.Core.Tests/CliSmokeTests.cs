@@ -102,6 +102,59 @@ public class CliSmokeTests
     }
 
     [Fact(Timeout = 90_000)]
+    public async Task StatusJson_ReturnsReadOnlyIndexMetadata()
+    {
+        var workingDirectory = CopyFixture("MultiProject");
+        try
+        {
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+
+            var output = await CliProcess.RunAsync($"status \"{workingDirectory}\" --json --check-freshness");
+
+            Assert.Equal(0, output.ExitCode);
+            using var document = JsonDocument.Parse(output.StdOut);
+            Assert.Equal(1, document.RootElement.GetProperty("version").GetInt32());
+            Assert.Equal("ready", document.RootElement.GetProperty("indexState").GetString());
+            Assert.False(document.RootElement.GetProperty("schemaOutdated").GetBoolean());
+            Assert.False(document.RootElement.GetProperty("analyzerVersionsOutdated").GetBoolean());
+            Assert.True(document.RootElement.GetProperty("symbols").GetInt32() > 0);
+            Assert.True(document.RootElement.GetProperty("edges").GetInt32() > 0);
+            Assert.True(document.RootElement.GetProperty("freshnessChecked").GetBoolean());
+            Assert.False(document.RootElement.GetProperty("stale").GetBoolean());
+
+            var textOutput = await CliProcess.RunAsync($"status \"{workingDirectory}\" --check-freshness");
+            Assert.Equal(0, textOutput.ExitCode);
+            Assert.Contains("State: ready", textOutput.StdOut);
+            Assert.Contains("Analyzers: current", textOutput.StdOut);
+            Assert.Contains("Freshness: current", textOutput.StdOut);
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact(Timeout = 15_000)]
+    public async Task StatusJson_NoIndex_ReturnsErrorEnvelope()
+    {
+        var workingDirectory = Path.Combine(Path.GetTempPath(), "codemap-cli-status-noindex-" + Guid.NewGuid());
+        Directory.CreateDirectory(workingDirectory);
+        try
+        {
+            var output = await CliProcess.RunAsync($"status \"{workingDirectory}\" --json");
+
+            Assert.Equal(1, output.ExitCode);
+            using var document = JsonDocument.Parse(output.StdOut);
+            Assert.Equal("index_not_found", document.RootElement.GetProperty("error").GetProperty("code").GetString());
+        }
+        finally
+        {
+            if (Directory.Exists(workingDirectory))
+                Directory.Delete(workingDirectory, recursive: true);
+        }
+    }
+
+    [Fact(Timeout = 90_000)]
     public async Task SliceJson_ForwardDirectionUsesV1Envelope()
     {
         var workingDirectory = CopyFixture("MultiProject");
