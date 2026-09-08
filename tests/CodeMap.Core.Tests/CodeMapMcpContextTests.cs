@@ -585,6 +585,30 @@ public sealed class CodeMapMcpContextTests
         }
     }
 
+    [Fact(Timeout = 90_000)]
+    public async Task GetSemanticSlice_UsesFreshIndexAndReturnsItems()
+    {
+        var workingDirectory = CopyFixtureToTempDirectory();
+        try
+        {
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+            using var context = new CodeMapMcpContext(workingDirectory);
+
+            var response = await CodeMapTools.GetSemanticSlice(context, "Fixture.ProjB.Greeter.Greet", root: workingDirectory,
+                cancellationToken: CancellationToken.None);
+
+            using var document = JsonDocument.Parse(response);
+            Assert.False(document.RootElement.TryGetProperty("error", out _), response);
+            Assert.Equal("Greet", document.RootElement.GetProperty("entrySymbol").GetProperty("Name").GetString());
+            Assert.NotEmpty(document.RootElement.GetProperty("items").EnumerateArray());
+            Assert.False(document.RootElement.GetProperty("stale").GetBoolean());
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
     private static string CopyFixtureToTempDirectory()
     {
         var testDir = AppContext.BaseDirectory;

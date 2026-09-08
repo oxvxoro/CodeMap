@@ -42,6 +42,10 @@ public sealed partial class IncrementalCodeMapIndexer
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         var root = ResolveRoot(inputPath, out var resolved);
         var store = new SqliteCodeMapStore(Path.Combine(root, ".codemap", "index.db"));
+        var preservedScip = force ? await ListScipProvidersAsync(root, cancellationToken) : Array.Empty<ScipProviderInfo>();
+        var staleScip = preservedScip.FirstOrDefault(provider => !provider.Fresh);
+        if (staleScip is not null)
+            throw new InvalidOperationException($"SCIP provider '{staleScip.Project}' is stale. Re-import it before running index --force.");
         if (force)
             WipeIndexArtifacts(root, store.DatabasePath);
 
@@ -61,6 +65,9 @@ public sealed partial class IncrementalCodeMapIndexer
 
         var files = projects.Where(p => !SqliteCodeMapStore.IsExternalProject(p.ProjectName)).Sum(p => p.Files.Count);
         await WriteStateAsync(root, resolved, projects, previousState: null, removedProjects: null, _lastProjectReferences, _lastPublicSurfaceFingerprints, _lastExternalAssembliesByOwningProject, cancellationToken);
+        foreach (var provider in preservedScip)
+            await new ScipImportService().ImportAsync(root, provider.Artifact, new ScipImportOptions(provider.Name), cancellationToken);
+        counts = await store.GetCountsAsync(cancellationToken);
         stopwatch.Stop();
         return new IndexSummary(files, files, 0, 0, 0, counts.Symbols, counts.Edges, stopwatch.Elapsed,
             projects.Select(project => project.ProjectName).ToArray());
@@ -91,6 +98,12 @@ public sealed partial class IncrementalCodeMapIndexer
         }
 
         var previousState = await TryLoadStateAsync(root, cancellationToken);
+        if (previousState is not null)
+        {
+            foreach (var project in previousState.Projects.Where(project => string.Equals(project.ProviderKind, "scip", StringComparison.Ordinal)))
+                if (!await IsScipProjectUpToDateAsync(project, cancellationToken))
+                    throw new InvalidOperationException($"SCIP provider '{project.ProjectName}' is stale. Re-import its artifact before running update.");
+        }
         if (previousState is null || !hadDatabase)
         {
             var fullProjects = await AnalyzeAllAsync(root, resolved, csharpProjectNames: null, dirtyProjectNames: null, cancellationToken);

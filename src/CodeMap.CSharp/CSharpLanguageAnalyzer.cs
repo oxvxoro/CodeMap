@@ -1046,6 +1046,23 @@ public sealed class CSharpWorkspaceIndexer
 
     public CSharpWorkspaceIndexer(CSharpLanguageAnalyzer? analyzer = null) => _analyzer = analyzer ?? new CSharpLanguageAnalyzer();
 
+    public static async Task<CSharpProjectWorkspace> OpenProjectWorkspaceAsync(string projectPath, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectPath);
+        EnsureMsBuildRegistered();
+        var workspace = MSBuildWorkspace.Create();
+        try
+        {
+            var project = await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken);
+            return new CSharpProjectWorkspace(workspace, project);
+        }
+        catch
+        {
+            workspace.Dispose();
+            throw;
+        }
+    }
+
     public IReadOnlyList<string> LastAnalyzedProjectNames { get; private set; } = Array.Empty<string>();
 
     public async Task<IReadOnlyList<CSharpProjectAnalysis>> AnalyzeAsync(
@@ -1326,6 +1343,13 @@ public sealed record CSharpWorkspaceAnalysisResult(
     IReadOnlyDictionary<string, string[]> ProjectReferences,
     IReadOnlyDictionary<string, string?> PublicSurfaceFingerprints,
     IReadOnlyDictionary<string, IReadOnlyList<ExternalAssemblyReference>>? ExternalAssembliesByOwningProject = null);
+
+public sealed class CSharpProjectWorkspace(MSBuildWorkspace workspace, Project project) : IDisposable
+{
+    public Project Project { get; } = project;
+
+    public void Dispose() => workspace.Dispose();
+}
 
 
 public sealed record ExternalAssemblyReference(string ExternalProjectName, string AssemblyPath, string AssemblyHash);

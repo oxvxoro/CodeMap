@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CodeMap SCIP Import v1",
+  "type": "object",
+  "required": ["version", "import"],
+  "properties": {
+    "version": { "const": 1 },
+    "import": {
+      "type": "object",
+      "required": ["provider", "project", "artifact", "artifactHash", "files", "symbols", "edges", "skippedSymbols"],
+      "properties": {
+        "provider": { "const": "scip" },
+        "project": { "type": "string", "pattern": "^scip:" },
+        "artifact": { "type": "string" },
+        "artifactHash": { "type": "string" },
+        "files": { "type": "integer", "minimum": 0 },
+        "symbols": { "type": "integer", "minimum": 0 },
+        "edges": { "type": "integer", "minimum": 0 },
+        "skippedSymbols": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

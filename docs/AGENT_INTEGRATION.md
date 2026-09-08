@@ -367,6 +367,12 @@ codemap update
 
 를 실행한 뒤 다시 조사한다.
 
+### Semantic Slice와 SCIP
+
+로컬 값의 정의·사용 흐름이 실제 질문일 때만 C# 심볼에 `codemap slice <query> --json`을 사용한다. Slice는 intraprocedural 분석이며 fresh index가 필요하다. 호출 경계를 넘는 흐름은 `callers`/`callees`를 사용한다. 원문이 필요한 경우에만 `--include-source`를 추가하며, 기본 응답에는 source가 포함되지 않는다.
+
+지원되지 않는 언어는 사용자가 만든 artifact를 `codemap scip import <artifact> --name <name>`으로 가져온다. C#/Razor/XAML/JS/TS/HTML/CSS source와 겹치는 SCIP document는 거부된다. plain SCIP reference는 `References`이며 `Calls`로 추측되지 않는다. source나 artifact가 바뀌면 재import가 필요하다.
+
 ---
 
 ## 8. 레거시 WebForms + JS 추적 예시

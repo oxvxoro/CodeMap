@@ -1,5 +1,7 @@
 using System.Text.Json;
+using CodeMap.Scip.Protocol;
 using CodeMap.Storage;
+using Google.Protobuf;
 using Microsoft.Data.Sqlite;
 
 namespace CodeMap.Core.Tests;
@@ -68,6 +70,136 @@ public class CliSmokeTests
             using var hitDocument = JsonDocument.Parse(hitOutput.StdOut);
             Assert.True(hitDocument.RootElement.GetProperty("matches").GetArrayLength() > 0);
             Assert.False(hitDocument.RootElement.TryGetProperty("error", out _));
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact(Timeout = 90_000)]
+    public async Task SliceJson_UsesFreshIndexAndReturnsSemanticItems()
+    {
+        var workingDirectory = CopyFixture("MultiProject");
+        try
+        {
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+
+            var output = await CliProcess.RunAsync($"slice Fixture.ProjB.Greeter.Greet --root \"{workingDirectory}\" --include-source --json");
+
+            Assert.Equal(0, output.ExitCode);
+            using var document = JsonDocument.Parse(output.StdOut);
+            Assert.Equal(1, document.RootElement.GetProperty("version").GetInt32());
+            Assert.Equal("backward", document.RootElement.GetProperty("direction").GetString());
+            Assert.Contains("Greet", document.RootElement.GetProperty("scope").GetProperty("displayName").GetString());
+            Assert.Equal(JsonValueKind.Array, document.RootElement.GetProperty("items").ValueKind);
+            Assert.Contains("Greet", document.RootElement.GetProperty("source").GetString());
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact(Timeout = 90_000)]
+    public async Task SliceJson_ForwardDirectionUsesV1Envelope()
+    {
+        var workingDirectory = CopyFixture("MultiProject");
+        try
+        {
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+
+            var output = await CliProcess.RunAsync($"slice Fixture.ProjB.Greeter.Greet --direction forward --root \"{workingDirectory}\" --json");
+
+            Assert.Equal(0, output.ExitCode);
+            using var document = JsonDocument.Parse(output.StdOut);
+            Assert.Equal(1, document.RootElement.GetProperty("version").GetInt32());
+            Assert.Equal(JsonValueKind.Array, document.RootElement.GetProperty("items").ValueKind);
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact(Timeout = 90_000)]
+    public async Task SliceJson_StaleIndexUsesSemanticSliceErrorEnvelope()
+    {
+        var workingDirectory = CopyFixture("MultiProject");
+        try
+        {
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+            await File.AppendAllTextAsync(Path.Combine(workingDirectory, "ProjB", "Greeter.cs"), "\n// stale");
+
+            var output = await CliProcess.RunAsync($"slice Fixture.ProjB.Greeter.Greet --root \"{workingDirectory}\" --json");
+
+            Assert.Equal(1, output.ExitCode);
+            using var document = JsonDocument.Parse(output.StdOut);
+            Assert.Equal(1, document.RootElement.GetProperty("version").GetInt32());
+            Assert.Equal("semantic_slice_stale_index", document.RootElement.GetProperty("error").GetProperty("code").GetString());
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact(Timeout = 90_000)]
+    public async Task SliceJson_AmbiguousQueryReturnsV1ErrorEnvelope()
+    {
+        var workingDirectory = CopyFixture("CollidingProjects");
+        try
+        {
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+            var output = await CliProcess.RunAsync($"slice Widget --root \"{workingDirectory}\" --json");
+
+            Assert.Equal(1, output.ExitCode);
+            using var document = JsonDocument.Parse(output.StdOut);
+            Assert.Equal(1, document.RootElement.GetProperty("version").GetInt32());
+            Assert.Equal("ambiguous", document.RootElement.GetProperty("error").GetProperty("code").GetString());
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact(Timeout = 90_000)]
+    public async Task ScipCli_ImportListAndRemoveUseV1Lifecycle()
+    {
+        var workingDirectory = Path.Combine(Path.GetTempPath(), "codemap-cli-scip-" + Guid.NewGuid());
+        Directory.CreateDirectory(workingDirectory);
+        var artifactPath = Path.Combine(workingDirectory, "app.scip");
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(workingDirectory, "app.py"), "def run():\n    return 1\n");
+            var index = new CodeMap.Scip.Protocol.Index
+            {
+                Documents = { new Document
+                {
+                    RelativePath = "app.py", Language = "python",
+                    Symbols = { new SymbolInformation { Symbol = "run", DisplayName = "run", Kind = 17 } },
+                    Occurrences = { new Occurrence { Symbol = "run", SymbolRoles = 1, SingleLineRange = new SingleLineRange { Line = 0, StartCharacter = 4, EndCharacter = 7 } } }
+                } }
+            };
+            await File.WriteAllBytesAsync(artifactPath, index.ToByteArray());
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+
+            var imported = await CliProcess.RunAsync($"scip import \"{artifactPath}\" --name py --root \"{workingDirectory}\" --json");
+            Assert.Equal(0, imported.ExitCode);
+            using (var document = JsonDocument.Parse(imported.StdOut))
+            {
+                Assert.Equal(1, document.RootElement.GetProperty("version").GetInt32());
+                Assert.Equal("scip:py", document.RootElement.GetProperty("import").GetProperty("project").GetString());
+            }
+
+            var listed = await CliProcess.RunAsync($"scip list --root \"{workingDirectory}\" --json");
+            Assert.Equal(0, listed.ExitCode);
+            using (var document = JsonDocument.Parse(listed.StdOut))
+                Assert.Contains(document.RootElement.GetProperty("providers").EnumerateArray(), item => item.GetProperty("name").GetString() == "py");
+
+            var removed = await CliProcess.RunAsync($"scip remove py --root \"{workingDirectory}\"");
+            Assert.Equal(0, removed.ExitCode);
         }
         finally
         {

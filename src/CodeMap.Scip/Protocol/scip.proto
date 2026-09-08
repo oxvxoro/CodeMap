@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package scip;
+option csharp_namespace = "CodeMap.Scip.Protocol";
+
+// Wire-compatible subset of the official SCIP schema used by the v1 importer.
+message Index {
+  repeated Document documents = 2;
+}
+
+message Document {
+  string relative_path = 1;
+  repeated Occurrence occurrences = 2;
+  repeated SymbolInformation symbols = 3;
+  string language = 4;
+}
+
+message SingleLineRange {
+  int32 line = 1;
+  int32 start_character = 2;
+  int32 end_character = 3;
+}
+
+message MultiLineRange {
+  int32 start_line = 1;
+  int32 start_character = 2;
+  int32 end_line = 3;
+  int32 end_character = 4;
+}
+
+message Occurrence {
+  repeated int32 range = 1 [packed = true];
+  string symbol = 2;
+  int32 symbol_roles = 3;
+  repeated int32 enclosing_range = 7 [packed = true];
+  oneof typed_range {
+    SingleLineRange single_line_range = 8;
+    MultiLineRange multi_line_range = 9;
+  }
+  oneof typed_enclosing_range {
+    SingleLineRange single_line_enclosing_range = 10;
+    MultiLineRange multi_line_enclosing_range = 11;
+  }
+}
+
+message SymbolInformation {
+  string symbol = 1;
+  repeated Relationship relationships = 4;
+  int32 kind = 5;
+  string display_name = 6;
+}
+
+message Relationship {
+  string symbol = 1;
+  bool is_reference = 2;
+  bool is_implementation = 3;
+  bool is_type_definition = 4;
+  bool is_definition = 5;
+}

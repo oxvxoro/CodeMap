@@ -16,6 +16,7 @@
     <ProjectReference Include="..\..\src\CodeMap.Storage\CodeMap.Storage.csproj" />
     <ProjectReference Include="..\..\src\CodeMap.Mcp\CodeMap.Mcp.csproj" />
     <ProjectReference Include="..\..\src\CodeMap.CSharp\CodeMap.CSharp.csproj" />
+    <ProjectReference Include="..\..\src\CodeMap.Scip\CodeMap.Scip.csproj" />
   </ItemGroup>
 
 </Project>

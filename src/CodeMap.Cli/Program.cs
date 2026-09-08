@@ -2,6 +2,7 @@ using System.CommandLine;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using CodeMap.CSharp;
 using CodeMap.Core.Models;
 using CodeMap.Mcp;
 using CodeMap.Storage;
@@ -12,6 +13,7 @@ public static partial class Program
 {
     private const int JsonSchemaVersion = 4;
     private const int JsonSchemaVersionWithEvidence = 5;
+    private const int SemanticSliceSchemaVersion = 1;
     private const int DefaultMaxResults = 20;
     private const int DefaultDepth = 1;
     private const int DefaultMapTokens = 500;
@@ -45,6 +47,11 @@ public static partial class Program
         updateCommand.AddArgument(updatePath);
         updateCommand.SetHandler(async (string path) => await RunUpdateAsync(path), updatePath);
         rootCommand.AddCommand(updateCommand);
+        var scipCommand = new Command("scip", "Manage imported SCIP providers.");
+        AddScipImportCommand(scipCommand);
+        AddScipListCommand(scipCommand);
+        AddScipRemoveCommand(scipCommand);
+        rootCommand.AddCommand(scipCommand);
 
         AddFindCommand(rootCommand);
         AddPairRelationCommand(rootCommand);
@@ -62,6 +69,7 @@ public static partial class Program
         AddMapCommand(rootCommand);
         AddContextCommand(rootCommand);
         AddFlowCommand(rootCommand);
+        AddSliceCommand(rootCommand);
 
         var invocationCode = await rootCommand.InvokeAsync(args);
 
@@ -196,6 +204,71 @@ public static partial class Program
         root.AddCommand(command);
     }
 
+    private static void AddScipImportCommand(Command scip)
+    {
+        var artifact = new Argument<string>("artifact", "Path to the SCIP .scip artifact.");
+        var name = new Option<string>("--name", "Stable provider name for this import.") { IsRequired = true };
+        var rootPath = new Option<string?>("--root", "Repository root containing an existing CodeMap index.");
+        var replace = new Option<bool>("--replace", () => true, "Replace a prior import with the same name.");
+        var json = new Option<bool>("--json", "Emit JSON summary.");
+        var command = new Command("import", "Import an externally generated SCIP artifact.");
+        command.AddArgument(artifact);
+        command.AddOption(name);
+        command.AddOption(rootPath);
+        command.AddOption(replace);
+        command.AddOption(json);
+        command.SetHandler(async (string artifactValue, string nameValue, string? rootValue, bool replaceValue, bool jsonValue) =>
+            await RunScipImportAsync(artifactValue, nameValue, rootValue, replaceValue, jsonValue), artifact, name, rootPath, replace, json);
+        scip.AddCommand(command);
+    }
+
+    private static void AddScipRemoveCommand(Command scip)
+    {
+        var name = new Argument<string>("name", "SCIP import name to remove.");
+        var rootPath = new Option<string?>("--root", "Repository root containing the CodeMap index.");
+        var remove = new Command("remove", "Remove an imported SCIP provider.");
+        remove.AddArgument(name);
+        remove.AddOption(rootPath);
+        remove.SetHandler(async (string nameValue, string? rootValue) => await RunScipRemoveAsync(nameValue, rootValue), name, rootPath);
+        scip.AddCommand(remove);
+    }
+
+    private static void AddScipListCommand(Command scip)
+    {
+        var rootPath = new Option<string?>("--root", "Repository root containing the CodeMap index.");
+        var json = new Option<bool>("--json", "Emit JSON provider registrations.");
+        var list = new Command("list", "List imported SCIP providers.");
+        list.AddOption(rootPath);
+        list.AddOption(json);
+        list.SetHandler(async (string? rootValue, bool jsonValue) => await RunScipListAsync(rootValue, jsonValue), rootPath, json);
+        scip.AddCommand(list);
+    }
+
+    private static void AddSliceCommand(RootCommand root)
+    {
+        var query = new Argument<string>("query", "C# executable symbol to analyze.");
+        var rootPath = new Option<string?>("--root", "Project root or directory containing .codemap/index.db.");
+        var direction = new Option<string>("--direction", () => "backward", "Slice direction: backward or forward.");
+        var line = new Option<int?>("--line", "Optional 1-based source line used as the slice seed.");
+        var column = new Option<int?>("--column", "Optional 1-based source column used with --line.");
+        var maxResults = new Option<int>("--max-results", () => 80, "Maximum number of returned slice items (1..500).");
+        var includeSource = new Option<bool>("--include-source", "Include the selected scope source text.");
+        var json = new Option<bool>("--json", "Emit stable JSON instead of compact text.");
+        var command = new Command("slice", "Compute an intraprocedural C# semantic dependency slice.");
+        command.AddArgument(query);
+        command.AddOption(rootPath);
+        command.AddOption(direction);
+        command.AddOption(line);
+        command.AddOption(column);
+        command.AddOption(maxResults);
+        command.AddOption(includeSource);
+        command.AddOption(json);
+        command.SetHandler(async (string queryValue, string? rootValue, string directionValue, int? lineValue, int? columnValue, int maxResultsValue, bool includeSourceValue, bool jsonValue) =>
+            await RunSliceAsync(queryValue, rootValue, directionValue, lineValue, columnValue, maxResultsValue, includeSourceValue, jsonValue),
+            query, rootPath, direction, line, column, maxResults, includeSource, json);
+        root.AddCommand(command);
+    }
+
     private sealed record QueryOptions(Option<string?> Root, Option<int> MaxResults, Option<int> Depth, Option<bool> Json);
 
     private static QueryOptions CreateQueryOptions() => new(
@@ -280,6 +353,97 @@ public static partial class Program
             return Exit(matches.Count == 0 ? 2 : 0);
         }
         catch (Exception exception) { return HandleQueryError(exception, json); }
+    }
+
+    private static async Task<int> RunScipImportAsync(string artifact, string name, string? root, bool replace, bool json)
+    {
+        try
+        {
+            var repositoryRoot = root is null ? Directory.GetCurrentDirectory() : Path.GetFullPath(root);
+            var summary = await new ScipImportService().ImportAsync(repositoryRoot, artifact,
+                new ScipImportOptions(name, replace), ShutdownToken);
+            if (json) WriteJson(new ScipImportResponse(1, summary));
+            else Console.WriteLine($"Imported {summary.Symbols} SCIP symbols from {summary.Files} files into {summary.Project}.");
+            return Exit(0);
+        }
+        catch (OperationCanceledException) when (ShutdownToken.IsCancellationRequested)
+        {
+            Console.Error.WriteLine("codemap import scip canceled.");
+            return Exit(130);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"codemap import scip failed: {exception.Message}");
+            return Exit(1);
+        }
+    }
+
+    private static async Task<int> RunScipRemoveAsync(string name, string? root)
+    {
+        try
+        {
+            await new ScipImportService().RemoveAsync(root is null ? Directory.GetCurrentDirectory() : root, name, ShutdownToken);
+            Console.WriteLine($"Removed SCIP provider scip:{name}.");
+            return Exit(0);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"codemap scip remove failed: {exception.Message}");
+            return Exit(1);
+        }
+    }
+
+    private static async Task<int> RunScipListAsync(string? root, bool json)
+    {
+        try
+        {
+            var providers = await new ScipImportService().ListAsync(root is null ? Directory.GetCurrentDirectory() : root, ShutdownToken);
+            if (json) WriteJson(new { version = 1, providers });
+            else foreach (var provider in providers)
+                Console.WriteLine($"{provider.Name}\n  project: {provider.Project}\n  artifact: {provider.Artifact}\n  files: {provider.Files}\n  fresh: {(provider.Fresh ? "yes" : "no")}");
+            return Exit(0);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"codemap scip list failed: {exception.Message}");
+            return Exit(1);
+        }
+    }
+
+    private static async Task<int> RunSliceAsync(string query, string? root, string direction, int? line, int? column, int maxResults, bool includeSource, bool json)
+    {
+        if (!Enum.TryParse<SliceDirection>(direction, ignoreCase: true, out var parsedDirection))
+        {
+            if (json) WriteJson(new ErrorResponse(SemanticSliceSchemaVersion, new ErrorDto("query_failed", "Direction must be 'backward' or 'forward'.")));
+            else Console.Error.WriteLine("Direction must be 'backward' or 'forward'.");
+            return Exit(1);
+        }
+        try
+        {
+            var databasePath = FindDatabase(root);
+            var projectRoot = Path.GetDirectoryName(Path.GetDirectoryName(databasePath))!;
+            var result = await new CodeMapSemanticSliceService().SliceAsync(projectRoot,
+                new SemanticSliceRequest(parsedDirection, line, column, maxResults, query, includeSource), ShutdownToken);
+            if (json)
+            {
+                WriteJson(new SemanticSliceResponse(SemanticSliceSchemaVersion, query, parsedDirection.ToString().ToLowerInvariant(), result.EntrySymbol.Id, result.Scope,
+                    result.Items, result.Dependencies, result.Truncated, result.Source));
+            }
+            else
+            {
+                Console.WriteLine(result.Scope.DisplayName);
+                Console.WriteLine($"  file: {result.Scope.File}:{result.Scope.StartLine ?? 0}");
+                foreach (var item in result.Items)
+                    Console.WriteLine($"  [{item.Id}] {item.Kind.ToString().ToLowerInvariant()}: {item.Display}");
+                if (result.Source is not null)
+                {
+                    Console.WriteLine("source:");
+                    Console.WriteLine(result.Source);
+                }
+            }
+            return Exit(0);
+        }
+        catch (Exception exception) { return HandleQueryError(exception, json, version: SemanticSliceSchemaVersion); }
     }
 
     private static async Task<int> RunRefsAsync(string query, string? root, int maxResults, int depth, bool json, bool evidence, double minConfidence)
@@ -677,11 +841,11 @@ public static partial class Program
         throw new FileNotFoundException("No CodeMap index found.\nRun: codemap index");
     }
 
-    private static int HandleQueryError(Exception exception, bool json, bool evidence = false)
+    private static int HandleQueryError(Exception exception, bool json, bool evidence = false, int? version = null)
     {
         var (code, message) = ClassifyError(exception);
         if (json)
-            WriteJson(new ErrorResponse(SchemaVersion(evidence), new ErrorDto(code, message)));
+            WriteJson(new ErrorResponse(version ?? SchemaVersion(evidence), new ErrorDto(code, message)));
         else
             Console.Error.WriteLine(message);
         return Exit(1);
@@ -697,6 +861,8 @@ public static partial class Program
             return ("schema_outdated", exception.Message);
         if (exception is GitUnavailableException git)
             return ("git_unavailable", git.Message);
+        if (exception is SemanticSliceException slice)
+            return (slice.Code, slice.Message);
         return ("query_failed", $"codemap query failed: {exception.Message}");
     }
 
@@ -825,6 +991,8 @@ public static partial class Program
     private sealed record PairRelationResponse(int Version, string Source, string Target, IReadOnlyList<MatchDto> Matches, IReadOnlyList<QueryRelation> Relations, bool Stale = false, string? Reason = null);
     private sealed record MapResponse(int Version, string? Project, string? Focus, int TokenBudget, int EstimatedTokens, IReadOnlyList<string> Lines, bool Stale = false, string? Mermaid = null, string? Format = null);
     private sealed record ContextResponse(int Version, string Task, IReadOnlyList<MatchDto> Matches, IReadOnlyList<QueryRelation> Relations, IReadOnlyList<string> MapLines, bool Stale = false);
+    private sealed record SemanticSliceResponse(int Version, string Query, string Direction, string SymbolId, SliceScope Scope, IReadOnlyList<SliceItem> Items, IReadOnlyList<SliceDependency> Dependencies, bool Truncated, string? Source = null);
+    private sealed record ScipImportResponse(int Version, ScipImportSummary Import);
     private sealed record ErrorDto(string Code, string Message);
     private sealed record ErrorResponse(int Version, ErrorDto Error);
 }

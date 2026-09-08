@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Text.Json;
+using CodeMap.CSharp;
 using CodeMap.Core;
 using CodeMap.Storage;
 using Microsoft.Extensions.DependencyInjection;
@@ -50,6 +51,7 @@ public sealed class CodeMapMcpContext(string defaultRoot) : IDisposable
     public string DefaultRoot { get; } = defaultRoot;
 
     private readonly ConcurrentDictionary<string, FreshnessEntry> _freshness = new(StringComparer.OrdinalIgnoreCase);
+    internal SemaphoreSlim SemanticSliceGate { get; } = new(1, 1);
 
 
 
@@ -75,6 +77,7 @@ public sealed class CodeMapMcpContext(string defaultRoot) : IDisposable
     {
         foreach (var entry in _freshness.Values)
             entry.Watcher?.Dispose();
+        SemanticSliceGate.Dispose();
     }
 
     public async Task<bool> IsUpToDateAsync(string projectRoot, CancellationToken cancellationToken)
@@ -217,6 +220,55 @@ public static class CodeMapTools
         var matches = service.Find(task, maxResults);
         var map = service.BuildMap(matches.FirstOrDefault()?.Name ?? task, null, tokens);
         return JsonSerializer.Serialize(new { matches, mapLines = map.Lines, stale = loaded.Stale });
+    }
+
+    [McpServerTool, Description("Compute an intraprocedural C# semantic dependency slice for one executable symbol. Requires a fresh CodeMap index; use refresh_index first when the index is stale.")]
+    public static async Task<string> GetSemanticSlice(
+        CodeMapMcpContext context,
+        string query,
+        string direction = "backward",
+        int? line = null,
+        int? column = null,
+        int maxResults = 80,
+        bool includeSource = false,
+        string? root = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Enum.TryParse<SliceDirection>(direction, ignoreCase: true, out var parsedDirection))
+            return JsonSerializer.Serialize(new { error = new { code = "query_failed", message = "direction must be 'backward' or 'forward'." } });
+
+        await context.SemanticSliceGate.WaitAsync(cancellationToken);
+        try
+        {
+            var indexRoot = ResolveIndexRoot(ResolveRoot(context, root));
+            var result = await new CodeMapSemanticSliceService().SliceAsync(indexRoot,
+                new SemanticSliceRequest(parsedDirection, line, column, maxResults, query, includeSource), cancellationToken);
+            return JsonSerializer.Serialize(new
+            {
+                version = 1,
+                query,
+                direction = parsedDirection.ToString().ToLowerInvariant(),
+                entrySymbol = result.EntrySymbol,
+                scope = result.Scope,
+                items = result.Items,
+                dependencies = result.Dependencies,
+                result.Truncated,
+                source = result.Source,
+                stale = false
+            });
+        }
+        catch (SemanticSliceException exception)
+        {
+            return JsonSerializer.Serialize(new { error = new { code = exception.Code, message = exception.Message }, stale = exception.Code == "semantic_slice_stale_index" });
+        }
+        catch (FileNotFoundException exception)
+        {
+            return JsonSerializer.Serialize(new { error = new { code = "index_not_found", message = exception.Message } });
+        }
+        finally
+        {
+            context.SemanticSliceGate.Release();
+        }
     }
 
     [McpServerTool, Description("Show reverse dependency impact for a symbol. profile 'code' (default) follows code references only; 'app' additionally reuses the routes/DI/UI edges flow already traverses.")]

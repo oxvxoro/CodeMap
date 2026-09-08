@@ -9,7 +9,7 @@ namespace CodeMap.Storage;
 
 public sealed partial class IncrementalCodeMapIndexer
 {
-    private const int IndexFormatVersion = 3;
+    private const int IndexFormatVersion = 4;
 
     private static readonly JsonSerializerOptions StateJsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true };
 
@@ -44,7 +44,11 @@ public sealed partial class IncrementalCodeMapIndexer
 
 
 
-        IReadOnlyList<IndexStateExternalAssembly>? ExternalAssemblies = null);
+        IReadOnlyList<IndexStateExternalAssembly>? ExternalAssemblies = null,
+        string? ProviderKind = null,
+        string? ProviderVersion = null,
+        string? ProviderInputPath = null,
+        string? ProviderInputHash = null);
 
     private sealed record IndexStateFile(
         string? SchemaVersion,
@@ -129,7 +133,11 @@ public sealed partial class IncrementalCodeMapIndexer
             var externalAssemblies = externalAssembliesByOwningProject.TryGetValue(project.ProjectName, out var owned)
                 ? owned.Select(reference => new IndexStateExternalAssembly(reference.ExternalProjectName, reference.AssemblyPath, reference.AssemblyHash)).ToArray()
                 : previousProject?.ExternalAssemblies;
-            stateProjectsByName[project.ProjectName] = new IndexStateProject(project.ProjectName, project.ProjectPath, projectFileHash, files, referencedProjects, fingerprint, externalAssemblies);
+            var providerKind = ProviderKindOf(project.ProjectName);
+            var providerVersion = providerKind == "web" ? WebLanguageAnalyzer.AnalyzerVersion : CSharpLanguageAnalyzer.AnalyzerVersion;
+            stateProjectsByName[project.ProjectName] = new IndexStateProject(
+                project.ProjectName, project.ProjectPath, projectFileHash, files, referencedProjects, fingerprint, externalAssemblies,
+                providerKind, providerVersion, Path.GetFullPath(project.ProjectPath), projectFileHash);
         }
 
         var mergedProjects = stateProjectsByName.Values.ToList();
@@ -142,6 +150,72 @@ public sealed partial class IncrementalCodeMapIndexer
         var state = new IndexStateFile(SqliteCodeMapStore.SchemaVersion, IndexFormatVersion, analyzerVersions, SqliteCodeMapStore.ConfigHash, SqliteCodeMapStore.ToolVersion,
             DateTimeOffset.UtcNow, resolved is null ? null : Path.GetFullPath(resolved), resolvedInputHash, mergedProjects);
         await WriteStateFileAtomicallyAsync(statePath, JsonSerializer.Serialize(state, StateJsonOptions), cancellationToken);
+    }
+
+    private static string ProviderKindOf(string projectName) =>
+        projectName.StartsWith("web:", StringComparison.Ordinal) ? "web" : "csharp";
+
+    internal static async Task WriteScipProviderStateAsync(
+        string root,
+        AnalyzedProject project,
+        string artifactPath,
+        string artifactHash,
+        CancellationToken cancellationToken)
+    {
+        var state = await TryLoadStateAsync(root, cancellationToken)
+            ?? throw new InvalidOperationException("A CodeMap index must exist before importing SCIP data.");
+        var projects = state.Projects.ToDictionary(item => item.ProjectName, StringComparer.Ordinal);
+        projects[project.ProjectName] = new IndexStateProject(
+            project.ProjectName,
+            Path.GetFullPath(root),
+            null,
+            project.Files.Select(file => new IndexStateFileEntry(file.RelativePath, SqliteCodeMapStore.ComputeContentHash(file.RelativePath, file.Content))).ToArray(),
+            ProviderKind: "scip",
+            ProviderVersion: Scip.ScipSymbolMapper.AnalyzerVersion,
+            ProviderInputPath: Path.GetFullPath(artifactPath),
+            ProviderInputHash: artifactHash);
+        var updated = state with { IndexedAtUtc = DateTimeOffset.UtcNow, Projects = projects.Values.OrderBy(item => item.ProjectName, StringComparer.Ordinal).ToArray() };
+        var statePath = Path.Combine(root, ".codemap", "state.json");
+        await WriteStateFileAtomicallyAsync(statePath, JsonSerializer.Serialize(updated, StateJsonOptions), cancellationToken);
+    }
+
+    internal static async Task RemoveScipProviderStateAsync(string root, string projectName, CancellationToken cancellationToken)
+    {
+        var state = await TryLoadStateAsync(root, cancellationToken)
+            ?? throw new InvalidOperationException("A CodeMap index state must exist before removing SCIP data.");
+        var project = state.Projects.FirstOrDefault(item => string.Equals(item.ProjectName, projectName, StringComparison.Ordinal));
+        if (project is null || !string.Equals(project.ProviderKind, "scip", StringComparison.Ordinal))
+            throw new InvalidOperationException($"SCIP provider '{projectName}' was not found.");
+        var updated = state with
+        {
+            IndexedAtUtc = DateTimeOffset.UtcNow,
+            Projects = state.Projects.Where(item => !string.Equals(item.ProjectName, projectName, StringComparison.Ordinal)).ToArray()
+        };
+        var statePath = Path.Combine(root, ".codemap", "state.json");
+        await WriteStateFileAtomicallyAsync(statePath, JsonSerializer.Serialize(updated, StateJsonOptions), cancellationToken);
+    }
+
+    internal static async Task<bool> IsScipProviderRecordedAsync(string root, string projectName, CancellationToken cancellationToken)
+    {
+        var state = await TryLoadStateAsync(root, cancellationToken);
+        return state?.Projects.Any(item => string.Equals(item.ProjectName, projectName, StringComparison.Ordinal)
+            && string.Equals(item.ProviderKind, "scip", StringComparison.Ordinal)) == true;
+    }
+
+    internal static async Task<IReadOnlyList<ScipProviderInfo>> ListScipProvidersAsync(string root, CancellationToken cancellationToken)
+    {
+        var state = await TryLoadStateAsync(root, cancellationToken);
+        if (state is null)
+            return Array.Empty<ScipProviderInfo>();
+        var result = new List<ScipProviderInfo>();
+        foreach (var project in state.Projects.Where(item => string.Equals(item.ProviderKind, "scip", StringComparison.Ordinal)).OrderBy(item => item.ProjectName, StringComparer.Ordinal))
+        {
+            var name = project.ProjectName.StartsWith("scip:", StringComparison.Ordinal) ? project.ProjectName[5..] : project.ProjectName;
+            result.Add(new ScipProviderInfo(name, project.ProjectName, project.ProviderInputPath ?? string.Empty,
+                project.ProviderInputHash ?? string.Empty, project.ProviderVersion ?? string.Empty, project.Files.Count,
+                await IsScipProjectUpToDateAsync(project, cancellationToken)));
+        }
+        return result;
     }
 
 
@@ -639,6 +713,9 @@ public sealed partial class IncrementalCodeMapIndexer
 
     private static async Task<bool> IsProjectUpToDateAsync(IndexStateProject project, CancellationToken cancellationToken)
     {
+        if (string.Equals(project.ProviderKind, "scip", StringComparison.Ordinal))
+            return await IsScipProjectUpToDateAsync(project, cancellationToken);
+
         var isWebProject = Directory.Exists(project.ProjectPath) && !File.Exists(project.ProjectPath);
         string projectDirectory;
         if (isWebProject)
@@ -682,6 +759,27 @@ public sealed partial class IncrementalCodeMapIndexer
             return false;
 
         return IsEveryExternalAssemblyUpToDate(project);
+    }
+
+    private static async Task<bool> IsScipProjectUpToDateAsync(IndexStateProject project, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(project.ProviderInputPath) || string.IsNullOrWhiteSpace(project.ProviderInputHash)
+            || !File.Exists(project.ProviderInputPath))
+            return false;
+        await using var stream = File.OpenRead(project.ProviderInputPath);
+        var currentHash = Convert.ToHexString(await System.Security.Cryptography.SHA256.HashDataAsync(stream, cancellationToken)).ToLowerInvariant();
+        if (!string.Equals(currentHash, project.ProviderInputHash, StringComparison.Ordinal))
+            return false;
+        foreach (var file in project.Files)
+        {
+            var path = Path.Combine(project.ProjectPath, file.RelativePath);
+            if (!File.Exists(path))
+                return false;
+            var content = await File.ReadAllTextAsync(path, cancellationToken);
+            if (!string.Equals(SqliteCodeMapStore.ComputeContentHash(file.RelativePath, content), file.Hash, StringComparison.Ordinal))
+                return false;
+        }
+        return true;
     }
 
 

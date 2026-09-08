@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CodeMap Semantic Slice v1",
+  "type": "object",
+  "required": ["version", "query", "direction", "symbolId", "scope", "items", "dependencies", "truncated"],
+  "properties": {
+    "version": { "const": 1 },
+    "query": { "type": "string" },
+    "direction": { "enum": ["backward", "forward"] },
+    "symbolId": { "type": "string" },
+    "scope": { "type": "object" },
+    "items": { "type": "array" },
+    "dependencies": { "type": "array" },
+    "truncated": { "type": "boolean" },
+    "source": { "type": ["string", "null"] }
+  }
+}
