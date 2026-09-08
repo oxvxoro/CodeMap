@@ -182,7 +182,9 @@ public static class CodeMapTools
     public static async Task<string> FindSymbol(CodeMapMcpContext context, string query, string? root = null, int maxResults = 20, CancellationToken cancellationToken = default)
     {
         var loaded = await OpenServiceAsync(context, root, cancellationToken);
-        await using var service = loaded.Service;
+        if (loaded.Error is not null)
+            return BuildingResponse(loaded.Error);
+        await using var service = loaded.Service!;
         var matches = service.Find(query, maxResults);
         return JsonSerializer.Serialize(new
         {
@@ -209,7 +211,9 @@ public static class CodeMapTools
 
 
         var loaded = await OpenServiceAsync(context, root, cancellationToken);
-        await using var service = loaded.Service;
+        if (loaded.Error is not null)
+            return BuildingResponse(loaded.Error);
+        await using var service = loaded.Service!;
         var matches = service.Find(task, maxResults);
         var map = service.BuildMap(matches.FirstOrDefault()?.Name ?? task, null, tokens);
         return JsonSerializer.Serialize(new { matches, mapLines = map.Lines, stale = loaded.Stale });
@@ -222,7 +226,9 @@ public static class CodeMapTools
             return JsonSerializer.Serialize(new { error = new { code = "query_failed", message = "profile must be one of: code, app." } });
 
         var loaded = await OpenServiceAsync(context, root, cancellationToken);
-        await using var service = loaded.Service;
+        if (loaded.Error is not null)
+            return BuildingResponse(loaded.Error);
+        await using var service = loaded.Service!;
         var resolution = service.ResolveSymbol(query, callableOnly: false, maxResults);
         if (resolution.Matches.Count == 0)
             return JsonSerializer.Serialize(new { error = "no_matches", stale = loaded.Stale });
@@ -247,7 +253,9 @@ public static class CodeMapTools
             });
 
         var loaded = await OpenServiceAsync(context, root, cancellationToken);
-        await using var service = loaded.Service;
+        if (loaded.Error is not null)
+            return BuildingResponse(loaded.Error);
+        await using var service = loaded.Service!;
         var sourceResolution = service.ResolveSymbol(source, callableOnly: false, maxResults);
         if (sourceResolution.Matches.Count == 0)
             return JsonSerializer.Serialize(new { error = "no_matches", stale = loaded.Stale });
@@ -296,7 +304,9 @@ public static class CodeMapTools
             return JsonSerializer.Serialize(new { error = new { code = "query_failed", message = $"depth must be between {CodeMapQueryService.FlowMinDepth} and {CodeMapQueryService.FlowMaxDepth}." } });
 
         var loaded = await OpenServiceAsync(context, root, cancellationToken);
-        await using var service = loaded.Service;
+        if (loaded.Error is not null)
+            return BuildingResponse(loaded.Error);
+        await using var service = loaded.Service!;
         var resolution = service.ResolveSymbol(entry, callableOnly: false, maxResults);
         if (resolution.Matches.Count == 0)
             return JsonSerializer.Serialize(new { error = "no_matches", stale = loaded.Stale });
@@ -420,31 +430,54 @@ public static class CodeMapTools
         return Path.GetDirectoryName(Path.GetDirectoryName(databasePath))!;
     }
 
-    private static async Task<(CodeMapQueryService Service, bool Stale)> OpenServiceAsync(CodeMapMcpContext context, string? root, CancellationToken cancellationToken)
+    private sealed record OpenServiceResult(CodeMapQueryService? Service, bool Stale, IndexBuildingException? Error = null);
+
+    private static string BuildingResponse(IndexBuildingException exception) =>
+        JsonSerializer.Serialize(new { error = new { code = "index_building", message = exception.Message }, stale = true });
+
+    private static async Task<OpenServiceResult> OpenServiceAsync(CodeMapMcpContext context, string? root, CancellationToken cancellationToken)
     {
         var databasePath = FindDatabase(ResolveRoot(context, root));
         var store = new CodeMapQueryStore(databasePath);
         var connectionTask = store.OpenReadOnlyConnectionAsync(cancellationToken);
         var staleTask = context.IsUpToDateAsync(Path.GetDirectoryName(Path.GetDirectoryName(databasePath))!, cancellationToken);
-        var connection = await connectionTask;
         try
         {
-            var upToDate = await staleTask;
-            return (new CodeMapQueryService(connection), !upToDate);
+            var connection = await connectionTask;
+            try
+            {
+                var upToDate = await staleTask;
+                return new OpenServiceResult(new CodeMapQueryService(connection), !upToDate);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await connection.DisposeAsync();
+                throw;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return new OpenServiceResult(new CodeMapQueryService(connection), Stale: true);
+            }
+            catch
+            {
+                await connection.DisposeAsync();
+                throw;
+            }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (IndexBuildingException exception)
         {
-            await connection.DisposeAsync();
-            throw;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            return (new CodeMapQueryService(connection), Stale: true);
-        }
-        catch
-        {
-            await connection.DisposeAsync();
-            throw;
+            try
+            {
+                await staleTask;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+            }
+            return new OpenServiceResult(null, Stale: true, exception);
         }
     }
 

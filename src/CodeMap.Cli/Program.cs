@@ -691,6 +691,8 @@ public static partial class Program
     {
         if (exception is FileNotFoundException && exception.Message.Contains("No CodeMap index found", StringComparison.Ordinal))
             return ("index_not_found", "No CodeMap index found.\nRun: codemap index");
+        if (exception is IndexBuildingException building)
+            return ("index_building", building.Message);
         if (exception is InvalidOperationException && exception.Message.Contains("CodeMap index schema is outdated", StringComparison.Ordinal))
             return ("schema_outdated", exception.Message);
         if (exception is GitUnavailableException git)

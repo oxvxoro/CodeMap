@@ -688,21 +688,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
                   -- kept. Zero registrations, multiple registrations, or a registration with
                   -- no ResolvesTo edge all leave ImplementedBy unfiltered, mirroring the
                   -- snapshot path's IsDiSelectedOrUnregisteredImplementation.
-                  AND (
-                    e.kind <> 'ImplementedBy'
-                    OR (SELECT COUNT(*) FROM edges reg WHERE reg.target_id = e.source_id AND reg.kind = 'Registers') <> 1
-                    OR NOT EXISTS (
-                        SELECT 1 FROM edges reg
-                        JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
-                        WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
-                    )
-                    OR e.target_id = (
-                        SELECT resolves.target_id FROM edges reg
-                        JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
-                        WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
-                        LIMIT 1
-                    )
-                  )
+                  AND ({DiNarrowingPredicate})
             ),
             min_depth AS (
                 SELECT id, MIN(depth) AS depth FROM flow WHERE depth > 0 GROUP BY id
@@ -723,21 +709,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
                               -- would have rejected as an unregistered implementer must not be
                               -- selectable here as evidence just because some other accepted
                               -- edge reaches the same (id, depth).
-                              AND (
-                                e.kind <> 'ImplementedBy'
-                                OR (SELECT COUNT(*) FROM edges reg WHERE reg.target_id = e.source_id AND reg.kind = 'Registers') <> 1
-                                OR NOT EXISTS (
-                                    SELECT 1 FROM edges reg
-                                    JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
-                                    WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
-                                )
-                                OR e.target_id = (
-                                    SELECT resolves.target_id FROM edges reg
-                                    JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
-                                    WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
-                                    LIMIT 1
-                                )
-                              )
+                              AND ({DiNarrowingPredicate})
                 JOIN flow parent ON parent.id = e.source_id AND parent.depth = md.depth - 1
             )
             SELECT s.id, s.file_id, f.project, f.relative_path, s.kind, s.name,

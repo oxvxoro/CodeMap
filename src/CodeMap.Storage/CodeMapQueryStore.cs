@@ -17,6 +17,14 @@ public sealed class CodeMapSnapshot
         (_byId ??= Symbols.ToDictionary(s => s.Id, StringComparer.Ordinal)).GetValueOrDefault(id);
 }
 
+public sealed class IndexBuildingException : InvalidOperationException
+{
+    public IndexBuildingException()
+        : base("CodeMap index is being rebuilt. Try again shortly.")
+    {
+    }
+}
+
 
 /// <summary>저장된 시맨틱 그래프를 읽기 전용으로 조회하는 저장소.</summary>
 public sealed class CodeMapQueryStore
@@ -41,6 +49,7 @@ public sealed class CodeMapQueryStore
         try
         {
             await connection.OpenAsync(cancellationToken);
+            await EnsureIndexReadyAsync(connection, cancellationToken);
             await EnsureSchemaVersionAsync(connection, cancellationToken);
             await EnsureAnalyzerVersionAsync(connection, cancellationToken);
             return connection;
@@ -64,6 +73,7 @@ public sealed class CodeMapQueryStore
             Cache = SqliteCacheMode.Shared
         }.ToString());
         await connection.OpenAsync(cancellationToken);
+        await EnsureIndexReadyAsync(connection, cancellationToken);
         await EnsureSchemaVersionAsync(connection, cancellationToken);
         await EnsureAnalyzerVersionAsync(connection, cancellationToken);
 
@@ -123,6 +133,7 @@ public sealed class CodeMapQueryStore
             Cache = SqliteCacheMode.Shared
         }.ToString());
         await connection.OpenAsync(cancellationToken);
+        await EnsureIndexReadyAsync(connection, cancellationToken);
         await EnsureSchemaVersionAsync(connection, cancellationToken);
         await EnsureAnalyzerVersionAsync(connection, cancellationToken);
 
@@ -197,6 +208,22 @@ public sealed class CodeMapQueryStore
         if (!string.Equals(storedVersion, SqliteCodeMapStore.SchemaVersion, StringComparison.Ordinal))
             throw new InvalidOperationException(
                 $"CodeMap index schema is outdated (found '{storedVersion ?? "none"}', expected '{SqliteCodeMapStore.SchemaVersion}').\nRun: codemap index --force");
+    }
+
+    private static async Task EnsureIndexReadyAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT value FROM metadata WHERE key = 'index_state'";
+            var state = (await command.ExecuteScalarAsync(cancellationToken)) as string;
+            if (string.Equals(state, "building", StringComparison.Ordinal))
+                throw new IndexBuildingException();
+        }
+        catch (SqliteException)
+        {
+            // Indexes written before index_state was introduced remain readable.
+        }
     }
 
     private static async Task EnsureAnalyzerVersionAsync(SqliteConnection connection, CancellationToken cancellationToken)

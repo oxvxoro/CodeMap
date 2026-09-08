@@ -1,4 +1,5 @@
 using CodeMap.CSharp;
+using CodeMap.Mcp;
 using CodeMap.Storage;
 using Microsoft.Data.Sqlite;
 using System.Text.Json;
@@ -17,6 +18,97 @@ namespace CodeMap.Core.Tests;
 [Collection("MsBuild")]
 public sealed class IncrementalUpdateTests
 {
+    [Fact]
+    public async Task QueryStore_BuildingIndex_RejectsAllReaderEntryPoints()
+    {
+        var workingDirectory = Path.Combine(Path.GetTempPath(), "codemap-building-index-" + Guid.NewGuid());
+        var databasePath = Path.Combine(workingDirectory, ".codemap", "index.db");
+        try
+        {
+            await new SqliteCodeMapStore(databasePath).InitializeAsync(CancellationToken.None);
+            await using (var connection = new SqliteConnection($"Data Source={databasePath}"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = """
+                    INSERT INTO metadata(key, value) VALUES('schema_version', $schemaVersion);
+                    INSERT INTO metadata(key, value) VALUES('index_state', 'building');
+                    """;
+                command.Parameters.AddWithValue("$schemaVersion", SqliteCodeMapStore.SchemaVersion);
+                await command.ExecuteNonQueryAsync();
+            }
+
+            var store = new CodeMapQueryStore(databasePath);
+            await Assert.ThrowsAsync<IndexBuildingException>(() => store.OpenReadOnlyConnectionAsync());
+            await Assert.ThrowsAsync<IndexBuildingException>(() => store.LoadAsync());
+            await Assert.ThrowsAsync<IndexBuildingException>(() => store.LoadProjectScopedAsync("AnyProject"));
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task McpTool_BuildingIndex_ReturnsStructuredStaleResponse()
+    {
+        var workingDirectory = Path.Combine(Path.GetTempPath(), "codemap-mcp-building-index-" + Guid.NewGuid());
+        var databasePath = Path.Combine(workingDirectory, ".codemap", "index.db");
+        try
+        {
+            await new SqliteCodeMapStore(databasePath).InitializeAsync(CancellationToken.None);
+            await using (var connection = new SqliteConnection($"Data Source={databasePath}"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = """
+                    INSERT INTO metadata(key, value) VALUES('schema_version', $schemaVersion);
+                    INSERT INTO metadata(key, value) VALUES('index_state', 'building');
+                    """;
+                command.Parameters.AddWithValue("$schemaVersion", SqliteCodeMapStore.SchemaVersion);
+                await command.ExecuteNonQueryAsync();
+            }
+
+            using var context = new CodeMapMcpContext(workingDirectory);
+            var response = await CodeMapTools.FindSymbol(context, "Anything", cancellationToken: CancellationToken.None);
+            using var document = JsonDocument.Parse(response);
+            Assert.True(document.RootElement.GetProperty("stale").GetBoolean());
+            Assert.Equal("index_building", document.RootElement.GetProperty("error").GetProperty("code").GetString());
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task QueryStore_IndexWithoutStateMetadata_RemainsReadable()
+    {
+        var workingDirectory = CopyFixtureToTempDirectory();
+        try
+        {
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+            var databasePath = Path.Combine(workingDirectory, ".codemap", "index.db");
+            await using (var connection = new SqliteConnection($"Data Source={databasePath}"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = "SELECT value FROM metadata WHERE key = 'index_state'";
+                Assert.Equal("ready", await command.ExecuteScalarAsync());
+
+                command.CommandText = "DELETE FROM metadata WHERE key = 'index_state'";
+                await command.ExecuteNonQueryAsync();
+            }
+
+            var graph = await new CodeMapQueryStore(databasePath).LoadAsync();
+            Assert.Contains(graph.Symbols, symbol => symbol.Name == "Greeter");
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
     [Fact]
     public async Task UpdateAsync_NoOpReportsNoChanges()
     {

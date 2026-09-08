@@ -131,8 +131,16 @@ public sealed class SqliteCodeMapStore
         CancellationToken cancellationToken)
     {
         SqliteConnection.ClearAllPools();
+        var isNewIndex = !File.Exists(DatabasePath);
         await InitializeAsync(cancellationToken);
         await using var connection = await OpenAsync(cancellationToken);
+
+        if (isNewIndex)
+        {
+            await using var buildingTransaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await SetMetadataAsync(connection, buildingTransaction, "index_state", "building", cancellationToken);
+            await buildingTransaction.CommitAsync(cancellationToken);
+        }
 
 
 
@@ -273,6 +281,7 @@ public sealed class SqliteCodeMapStore
             if (CurrentAnalyzerVersions.TryGetValue(language, out var version))
                 await SetMetadataAsync(connection, transaction, $"analyzer_version_{language}", version, cancellationToken);
         await SetMetadataAsync(connection, transaction, "last_indexed_at_utc", DateTimeOffset.UtcNow.ToString("O"), cancellationToken);
+        await SetMetadataAsync(connection, transaction, "index_state", "ready", cancellationToken);
         await transaction.CommitAsync(cancellationToken);
     }
 

@@ -5,6 +5,22 @@ namespace CodeMap.Storage;
 
 public sealed partial class CodeMapQueryService
 {
+    private const string DiNarrowingPredicate = """
+        e.kind <> 'ImplementedBy'
+        OR (SELECT COUNT(*) FROM edges reg WHERE reg.target_id = e.source_id AND reg.kind = 'Registers') <> 1
+        OR NOT EXISTS (
+            SELECT 1 FROM edges reg
+            JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
+            WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
+        )
+        OR e.target_id = (
+            SELECT resolves.target_id FROM edges reg
+            JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
+            WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
+            LIMIT 1
+        )
+        """;
+
     private IReadOnlyList<IndexedSymbol> QuerySymbolsInFiles(HashSet<string> relativePaths, int maxResults)
     {
         var symbols = new Dictionary<string, IndexedSymbol>(StringComparer.Ordinal);
@@ -429,21 +445,7 @@ public sealed partial class CodeMapQueryService
                   -- edges, a no-op for every other kind in the set, so it is safe to leave
                   -- unconditional for both "code" (which never includes ImplementedBy) and
                   -- "app" profiles.
-                  AND (
-                    e.kind <> 'ImplementedBy'
-                    OR (SELECT COUNT(*) FROM edges reg WHERE reg.target_id = e.source_id AND reg.kind = 'Registers') <> 1
-                    OR NOT EXISTS (
-                        SELECT 1 FROM edges reg
-                        JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
-                        WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
-                    )
-                    OR e.target_id = (
-                        SELECT resolves.target_id FROM edges reg
-                        JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
-                        WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
-                        LIMIT 1
-                    )
-                  )
+                  AND ({DiNarrowingPredicate})
             ),
             min_depth AS (
                 SELECT id, MIN(depth) AS depth FROM impact WHERE depth > 0 GROUP BY id
@@ -463,21 +465,7 @@ public sealed partial class CodeMapQueryService
                               -- have rejected as an unregistered implementer must not be
                               -- selectable here as evidence just because some other accepted
                               -- edge reaches the same (id, depth).
-                              AND (
-                                e.kind <> 'ImplementedBy'
-                                OR (SELECT COUNT(*) FROM edges reg WHERE reg.target_id = e.source_id AND reg.kind = 'Registers') <> 1
-                                OR NOT EXISTS (
-                                    SELECT 1 FROM edges reg
-                                    JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
-                                    WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
-                                )
-                                OR e.target_id = (
-                                    SELECT resolves.target_id FROM edges reg
-                                    JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
-                                    WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
-                                    LIMIT 1
-                                )
-                              )
+                              AND ({DiNarrowingPredicate})
                 JOIN impact parent ON parent.id = e.target_id AND parent.depth = md.depth - 1
             )
             SELECT s.id, s.file_id, f.project, f.relative_path, s.kind, s.name,
@@ -545,21 +533,7 @@ public sealed partial class CodeMapQueryService
                   AND i.depth < $maxDepth
                   -- DI-aware narrowing (mirrors QueryImpact/QueryFlow): applies only to
                   -- ImplementedBy edges, a no-op for every other kind in the set.
-                  AND (
-                    e.kind <> 'ImplementedBy'
-                    OR (SELECT COUNT(*) FROM edges reg WHERE reg.target_id = e.source_id AND reg.kind = 'Registers') <> 1
-                    OR NOT EXISTS (
-                        SELECT 1 FROM edges reg
-                        JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
-                        WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
-                    )
-                    OR e.target_id = (
-                        SELECT resolves.target_id FROM edges reg
-                        JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
-                        WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
-                        LIMIT 1
-                    )
-                  )
+                  AND ({DiNarrowingPredicate})
             ),
             min_depth AS (
                 SELECT root_id, id, MIN(depth) AS depth FROM impact WHERE depth > 0 GROUP BY root_id, id
@@ -574,21 +548,7 @@ public sealed partial class CodeMapQueryService
                        ) AS row_number
                 FROM min_depth md
                 JOIN edges e ON e.source_id = md.id AND e.kind IN ({kindList})
-                              AND (
-                                e.kind <> 'ImplementedBy'
-                                OR (SELECT COUNT(*) FROM edges reg WHERE reg.target_id = e.source_id AND reg.kind = 'Registers') <> 1
-                                OR NOT EXISTS (
-                                    SELECT 1 FROM edges reg
-                                    JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
-                                    WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
-                                )
-                                OR e.target_id = (
-                                    SELECT resolves.target_id FROM edges reg
-                                    JOIN edges resolves ON resolves.source_id = reg.source_id AND resolves.kind = 'ResolvesTo'
-                                    WHERE reg.target_id = e.source_id AND reg.kind = 'Registers'
-                                    LIMIT 1
-                                )
-                              )
+                              AND ({DiNarrowingPredicate})
                 JOIN impact parent ON parent.root_id = md.root_id AND parent.id = e.target_id AND parent.depth = md.depth - 1
             ),
             ranked AS (
