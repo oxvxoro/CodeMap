@@ -258,6 +258,8 @@ public sealed partial class IncrementalCodeMapIndexer
                 return null;
             if (!string.Equals(state.SchemaVersion, SqliteCodeMapStore.SchemaVersion, StringComparison.Ordinal))
                 throw CreateVersionMismatch("schema", state.SchemaVersion, SqliteCodeMapStore.SchemaVersion);
+            if (!string.Equals(state.ConfigHash, SqliteCodeMapStore.ConfigHash, StringComparison.Ordinal))
+                return null;
             return state;
         }
         catch (JsonException)

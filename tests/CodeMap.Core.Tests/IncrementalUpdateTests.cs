@@ -42,6 +42,59 @@ public sealed class IncrementalUpdateTests
     }
 
     [Fact]
+    public async Task UpdateAsync_StateExistsButDatabaseMissing_RebuildsIndex()
+    {
+        var workingDirectory = CopyFixtureToTempDirectory();
+        try
+        {
+            var indexer = new IncrementalCodeMapIndexer();
+            await indexer.IndexAsync(workingDirectory, force: true, CancellationToken.None);
+
+            var databasePath = Path.Combine(workingDirectory, ".codemap", "index.db");
+            Assert.True(File.Exists(Path.Combine(workingDirectory, ".codemap", "state.json")));
+            SqliteConnection.ClearAllPools();
+            File.Delete(databasePath);
+            File.Delete(databasePath + "-wal");
+            File.Delete(databasePath + "-shm");
+
+            var result = await indexer.UpdateAsync(workingDirectory, CancellationToken.None);
+
+            Assert.True(File.Exists(databasePath));
+            Assert.NotEmpty(result.AnalyzedProjects);
+            Assert.True(result.Symbols > 0);
+            var graph = await new CodeMapQueryStore(databasePath).LoadAsync();
+            Assert.Contains(graph.Symbols, symbol => symbol.Name == "Greeter");
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task IsUpToDateAsync_StateExistsButDatabaseMissing_ReturnsFalse()
+    {
+        var workingDirectory = CopyFixtureToTempDirectory();
+        try
+        {
+            var indexer = new IncrementalCodeMapIndexer();
+            await indexer.IndexAsync(workingDirectory, force: true, CancellationToken.None);
+
+            var databasePath = Path.Combine(workingDirectory, ".codemap", "index.db");
+            SqliteConnection.ClearAllPools();
+            File.Delete(databasePath);
+            File.Delete(databasePath + "-wal");
+            File.Delete(databasePath + "-shm");
+
+            Assert.False(await indexer.IsUpToDateAsync(workingDirectory, CancellationToken.None));
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact]
     public async Task UpdateAsync_DetectsModifiedAddedAndRemovedFiles()
     {
         var workingDirectory = CopyFixtureToTempDirectory();
@@ -79,6 +132,62 @@ public sealed class IncrementalUpdateTests
             File.Delete(extraFilePath);
             var removed = await indexer.UpdateAsync(workingDirectory, CancellationToken.None);
             Assert.Equal(1, removed.Removed);
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task UpdateAsync_WebBindingsModeChange_ReanalyzesWithoutSourceChanges()
+    {
+        var workingDirectory = CopyWebFixtureToTempDirectory();
+        var originalBindings = Environment.GetEnvironmentVariable("CODEMAP_WEB_BINDINGS");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODEMAP_WEB_BINDINGS", "enabled");
+            var indexer = new IncrementalCodeMapIndexer();
+            await indexer.IndexAsync(workingDirectory, force: true, CancellationToken.None);
+
+            var statePath = Path.Combine(workingDirectory, ".codemap", "state.json");
+            var enabledHash = ReadConfigHash(await File.ReadAllTextAsync(statePath));
+            var databasePath = Path.Combine(workingDirectory, ".codemap", "index.db");
+            var enabledGraph = await new CodeMapQueryStore(databasePath).LoadAsync();
+            Assert.Contains(enabledGraph.Edges, edge => edge.Kind == CodeMap.Core.Models.EdgeKind.Calls && edge.ResolutionKind == CodeMap.Core.Models.EdgeResolutionKind.Syntactic);
+
+            Environment.SetEnvironmentVariable("CODEMAP_WEB_BINDINGS", "0");
+            var result = await indexer.UpdateAsync(workingDirectory, CancellationToken.None);
+
+            Assert.Contains(result.AnalyzedProjects, project => project.StartsWith("web:", StringComparison.Ordinal));
+            Assert.NotEqual(enabledHash, ReadConfigHash(await File.ReadAllTextAsync(statePath)));
+            var disabledGraph = await new CodeMapQueryStore(databasePath).LoadAsync();
+            Assert.DoesNotContain(disabledGraph.Edges, edge => edge.Kind == CodeMap.Core.Models.EdgeKind.Calls && edge.ResolutionKind == CodeMap.Core.Models.EdgeResolutionKind.Syntactic);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODEMAP_WEB_BINDINGS", originalBindings);
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task UpdateAsync_ConfigHashMismatch_DoesNotReusePreviousState()
+    {
+        var workingDirectory = CopyFixtureToTempDirectory();
+        try
+        {
+            var indexer = new IncrementalCodeMapIndexer();
+            await indexer.IndexAsync(workingDirectory, force: true, CancellationToken.None);
+
+            var statePath = Path.Combine(workingDirectory, ".codemap", "state.json");
+            await File.WriteAllTextAsync(statePath, ReplaceConfigHash(await File.ReadAllTextAsync(statePath), "incompatible"));
+
+            var result = await indexer.UpdateAsync(workingDirectory, CancellationToken.None);
+
+            Assert.Contains("ProjA", result.AnalyzedProjects);
+            Assert.Contains("ProjB", result.AnalyzedProjects);
+            Assert.NotEqual("incompatible", ReadConfigHash(await File.ReadAllTextAsync(statePath)));
         }
         finally
         {
@@ -567,6 +676,31 @@ public sealed class IncrementalUpdateTests
         return System.Text.Encoding.UTF8.GetString(stream.ToArray());
     }
 
+    private static string ReadConfigHash(string stateText)
+    {
+        using var document = JsonDocument.Parse(stateText);
+        return document.RootElement.GetProperty("configHash").GetString()!;
+    }
+
+    private static string ReplaceConfigHash(string stateText, string configHash)
+    {
+        using var document = JsonDocument.Parse(stateText);
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (string.Equals(property.Name, "configHash", StringComparison.Ordinal))
+                    writer.WriteString(property.Name, configHash);
+                else
+                    property.WriteTo(writer);
+            }
+            writer.WriteEndObject();
+        }
+        return System.Text.Encoding.UTF8.GetString(stream.ToArray());
+    }
+
     private static void CopyFixture(string source, string destination)
     {
         Directory.CreateDirectory(destination);
@@ -593,6 +727,16 @@ public sealed class IncrementalUpdateTests
             Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
             File.Copy(file, targetPath, overwrite: true);
         }
+        return destination;
+    }
+
+    private static string CopyWebFixtureToTempDirectory()
+    {
+        var testDir = AppContext.BaseDirectory;
+        var solutionRoot = Path.GetFullPath(Path.Combine(testDir, "..", "..", "..", "..", ".."));
+        var source = Path.Combine(solutionRoot, "tests", "Fixtures", "WebFixture");
+        var destination = Path.Combine(Path.GetTempPath(), "codemap-web-incremental-" + Guid.NewGuid());
+        CopyFixture(source, destination);
         return destination;
     }
 

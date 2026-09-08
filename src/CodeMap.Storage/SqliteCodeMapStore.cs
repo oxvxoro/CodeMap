@@ -56,7 +56,8 @@ public sealed class SqliteCodeMapStore
             ["web"] = WebLanguageAnalyzer.AnalyzerVersion
         };
 
-    internal static string ConfigHash => ComputeContentHash("config:none", "");
+    internal static string ConfigHash => ComputeContentHash("config:v1",
+        string.Equals(Environment.GetEnvironmentVariable("CODEMAP_WEB_BINDINGS"), "0", StringComparison.Ordinal) ? "webBindings=disabled" : "webBindings=enabled");
 
     internal static string ToolVersion =>
         typeof(IncrementalCodeMapIndexer).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion

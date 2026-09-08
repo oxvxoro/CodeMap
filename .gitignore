@@ -11,3 +11,4 @@ artifacts/
 INDEX.md
 logs/
 BenchmarkDotNet.Artifacts/
+docs/design/

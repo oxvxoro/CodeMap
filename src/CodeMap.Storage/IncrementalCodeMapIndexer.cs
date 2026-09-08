@@ -79,7 +79,9 @@ public sealed partial class IncrementalCodeMapIndexer
 
         if (hadDatabase)
             await EnsureAnalyzerVersionsAsync(store.DatabasePath, cancellationToken);
-        var cachedState = await TryLoadUpToDateStateAsync(root, resolved, cancellationToken);
+        var cachedState = hadDatabase
+            ? await TryLoadUpToDateStateAsync(root, resolved, cancellationToken)
+            : null;
         if (cachedState is not null)
         {
             var cachedCounts = await store.GetCountsAsync(cancellationToken);
@@ -263,6 +265,8 @@ public sealed partial class IncrementalCodeMapIndexer
     public async Task<bool> IsUpToDateAsync(string inputPath, CancellationToken cancellationToken = default)
     {
         var root = ResolveRoot(inputPath, out var resolved);
+        if (!File.Exists(Path.Combine(root, ".codemap", "index.db")))
+            return false;
         return await TryLoadUpToDateStateAsync(root, resolved, cancellationToken) is not null;
     }
 
