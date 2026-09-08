@@ -285,11 +285,14 @@ public static partial class Program
             var analysisImpact = service.ImpactUnion(directSymbols, depth, int.MaxValue, profile);
             var displayImpact = analysisImpact.Take(Math.Max(1, maxResults)).ToArray();
             var risk = RiskScorer.Score(directSymbols, analysisImpact);
-            var relations = displayImpact
+            var relationItems = displayImpact
                 .Select(item => (Item: item, Root: directSymbols.FirstOrDefault(symbol => symbol.Id == item.RootId)))
                 .Where(item => item.Root is not null)
-                .Select(item => ToRelation("impact", item.Item.Symbol, item.Root!, item.Item.Depth, item.Item.Via, service, evidence))
-                .Where(relation => relation.Confidence is null || relation.Confidence >= minConfidence)
+                .Where(item => MeetsMinConfidence(item.Item.Via, minConfidence))
+                .ToArray();
+            var fileById = PreloadEvidenceFiles(service, evidence, relationItems.Select(item => item.Item.Via));
+            var relations = relationItems
+                .Select(item => ToRelation("impact", item.Item.Symbol, item.Root!, item.Item.Depth, item.Item.Via, service, evidence, preloadedFileById: fileById))
                 .ToArray();
 
             if (json)
@@ -319,8 +322,8 @@ public static partial class Program
                 Console.WriteLine($"direct symbols: {directSymbols.Count}");
                 foreach (var symbol in displaySymbols) Console.WriteLine($"  {ToDisplay(symbol)}");
                 Console.WriteLine($"risk: {risk.Level} (publicApi={risk.PublicApis}, callers={risk.Callers}, crossProject={risk.CrossProject}, untested={risk.Untested})");
-                foreach (var item in displayImpact)
-                    Console.WriteLine($"<- {ToDisplay(item.Symbol)} (depth {item.Depth})");
+                foreach (var item in relationItems)
+                    Console.WriteLine($"<- {ToDisplay(item.Item.Symbol)} (depth {item.Item.Depth})");
             }
             return Exit(0);
         }
@@ -367,7 +370,9 @@ public static partial class Program
             EnableRaisingEvents = true,
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size
         };
-        var debounce = new CancellationTokenSource();
+        var debounceGate = new object();
+        CancellationTokenSource? activeDebounce = null;
+        var stopping = false;
         async Task RunUpdateAsync(bool fullScan)
         {
             await updateGate.WaitAsync(ShutdownToken);
@@ -387,15 +392,22 @@ public static partial class Program
         }
         void ScheduleUpdate()
         {
-            debounce.Cancel();
-            debounce.Dispose();
-            debounce = new CancellationTokenSource();
-            var token = debounce.Token;
+            var debounce = new CancellationTokenSource();
+            lock (debounceGate)
+            {
+                if (stopping)
+                {
+                    debounce.Dispose();
+                    return;
+                }
+                activeDebounce?.Cancel();
+                activeDebounce = debounce;
+            }
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await Task.Delay(Math.Max(100, debounceMs), token);
+                    await Task.Delay(Math.Max(100, debounceMs), debounce.Token);
                     await RunUpdateAsync(fullScan: false);
                 }
                 catch (OperationCanceledException) { }
@@ -403,7 +415,16 @@ public static partial class Program
                 {
                     Console.Error.WriteLine($"watch update failed: {exception.Message}");
                 }
-            }, token);
+                finally
+                {
+                    lock (debounceGate)
+                    {
+                        if (ReferenceEquals(activeDebounce, debounce))
+                            activeDebounce = null;
+                        debounce.Dispose();
+                    }
+                }
+            });
         }
         watcher.Changed += (_, eventArgs) => { if (!ShouldWatch(root, eventArgs.FullPath)) return; ScheduleUpdate(); };
         watcher.Created += (_, eventArgs) => { if (!ShouldWatch(root, eventArgs.FullPath)) return; ScheduleUpdate(); };
@@ -431,8 +452,12 @@ public static partial class Program
         finally
         {
             watcher.EnableRaisingEvents = false;
-            debounce.Cancel();
-            debounce.Dispose();
+            lock (debounceGate)
+            {
+                stopping = true;
+                activeDebounce?.Cancel();
+                activeDebounce = null;
+            }
         }
     }
 

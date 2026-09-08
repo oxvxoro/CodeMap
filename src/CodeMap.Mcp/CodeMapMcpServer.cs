@@ -62,6 +62,9 @@ public sealed class CodeMapMcpContext(string defaultRoot) : IDisposable
         NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size
     };
 
+    internal Func<string, CancellationToken, Task<bool>> FreshnessProbe { private get; init; } =
+        (root, cancellationToken) => new IncrementalCodeMapIndexer().IsUpToDateAsync(root, cancellationToken);
+
 
 
 
@@ -93,7 +96,7 @@ public sealed class CodeMapMcpContext(string defaultRoot) : IDisposable
             generation = entry.Generation;
         }
 
-        var upToDate = await new IncrementalCodeMapIndexer().IsUpToDateAsync(key, cancellationToken);
+        var upToDate = await FreshnessProbe(key, cancellationToken);
 
         lock (entry.Gate)
         {
@@ -104,7 +107,9 @@ public sealed class CodeMapMcpContext(string defaultRoot) : IDisposable
 
 
 
-            if (entry.Generation == generation && entry.Watcher is not null)
+            if (entry.Generation != generation)
+                return false;
+            if (entry.Watcher is not null)
                 entry.UpToDate = upToDate;
         }
         return upToDate;

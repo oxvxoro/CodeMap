@@ -17,6 +17,39 @@ namespace CodeMap.Core.Tests;
 public sealed class CodeMapMcpContextTests
 {
     [Fact]
+    public async Task IsUpToDateAsync_InvalidatedDuringProbe_ReturnsStaleForCurrentCall()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "codemap-mcp-freshness-" + Guid.NewGuid());
+        Directory.CreateDirectory(root);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var context = new CodeMapMcpContext(root)
+        {
+            WatcherFactory = _ => throw new IOException("Simulated FileSystemWatcher construction failure."),
+            FreshnessProbe = async (_, _) =>
+            {
+                entered.SetResult();
+                return await completed.Task;
+            }
+        };
+        try
+        {
+            var upToDate = context.IsUpToDateAsync(root, CancellationToken.None);
+            await entered.Task;
+
+            context.InvalidateRoot(root);
+            completed.SetResult(true);
+
+            Assert.False(await upToDate);
+        }
+        finally
+        {
+            context.Dispose();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task IsUpToDateAsync_ReturnsCachedValue_UntilExplicitlyInvalidated()
     {
         var workingDirectory = CopyFixtureToTempDirectory();

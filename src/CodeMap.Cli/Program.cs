@@ -286,11 +286,11 @@ public static partial class Program
     {
         return await RunResolvedAsync(query, root, maxResults, json, evidence, minConfidence, callableOnly: false, (service, symbol) =>
         {
-            var implemented = service.ImplementationRelations(symbol, maxResults);
-            var referenced = service.ReferencedByRelations(symbol, maxResults);
-            var relations = implemented.Select(item => ToRelation("implemented-by", item.Symbol, symbol, null, item.Edge, service, evidence))
-                .Concat(referenced.Select(item => ToRelation("referenced-by", item.Symbol, symbol, null, item.Edge, service, evidence)))
-                .Where(relation => relation.Confidence is null || relation.Confidence >= minConfidence)
+            var implemented = service.ImplementationRelations(symbol, maxResults).Where(item => MeetsMinConfidence(item.Edge, minConfidence)).ToArray();
+            var referenced = service.ReferencedByRelations(symbol, maxResults).Where(item => MeetsMinConfidence(item.Edge, minConfidence)).ToArray();
+            var fileById = PreloadEvidenceFiles(service, evidence, implemented.Select(item => item.Edge).Concat(referenced.Select(item => item.Edge)));
+            var relations = implemented.Select(item => ToRelation("implemented-by", item.Symbol, symbol, null, item.Edge, service, evidence, preloadedFileById: fileById))
+                .Concat(referenced.Select(item => ToRelation("referenced-by", item.Symbol, symbol, null, item.Edge, service, evidence, preloadedFileById: fileById)))
                 .ToArray();
             if (json) return new QueryResponse(SchemaVersion(evidence), query, [ToMatch(symbol)], relations);
             Console.WriteLine(ToDisplay(symbol));
@@ -305,9 +305,9 @@ public static partial class Program
     {
         return await RunResolvedAsync(query, root, maxResults, json, evidence, minConfidence, callableOnly: true, (service, symbol) =>
         {
-            var callers = service.CallerRelations(symbol, maxResults);
-            var relations = callers.Select(item => ToRelation("caller", item.Symbol, symbol, null, item.Edge, service, evidence))
-                .Where(relation => relation.Confidence is null || relation.Confidence >= minConfidence)
+            var callers = service.CallerRelations(symbol, maxResults).Where(item => MeetsMinConfidence(item.Edge, minConfidence)).ToArray();
+            var fileById = PreloadEvidenceFiles(service, evidence, callers.Select(item => item.Edge));
+            var relations = callers.Select(item => ToRelation("caller", item.Symbol, symbol, null, item.Edge, service, evidence, preloadedFileById: fileById))
                 .ToArray();
             if (json) return new QueryResponse(SchemaVersion(evidence), query, [ToMatch(symbol)], relations);
             Console.WriteLine(ToDisplay(symbol));
@@ -321,9 +321,9 @@ public static partial class Program
     {
         return await RunResolvedAsync(query, root, maxResults, json, evidence, minConfidence, callableOnly: true, (service, symbol) =>
         {
-            var callees = service.CalleeRelations(symbol, depth, maxResults);
-            var relations = callees.Select(item => ToRelation("callee", symbol, item.Symbol, null, item.Edge, service, evidence))
-                .Where(relation => relation.Confidence is null || relation.Confidence >= minConfidence)
+            var callees = service.CalleeRelations(symbol, depth, maxResults).Where(item => MeetsMinConfidence(item.Edge, minConfidence)).ToArray();
+            var fileById = PreloadEvidenceFiles(service, evidence, callees.Select(item => item.Edge));
+            var relations = callees.Select(item => ToRelation("callee", symbol, item.Symbol, null, item.Edge, service, evidence, preloadedFileById: fileById))
                 .ToArray();
             if (json) return new QueryResponse(SchemaVersion(evidence), query, [ToMatch(symbol)], relations);
             Console.WriteLine(ToDisplay(symbol));
@@ -337,9 +337,9 @@ public static partial class Program
     {
         return await RunResolvedAsync(query, root, maxResults, json, evidence, minConfidence, callableOnly: false, (service, symbol) =>
         {
-            var implementations = service.ImplementationRelations(symbol, maxResults);
-            var relations = implementations.Select(item => ToRelation("implemented-by", symbol, item.Symbol, null, item.Edge, service, evidence))
-                .Where(relation => relation.Confidence is null || relation.Confidence >= minConfidence)
+            var implementations = service.ImplementationRelations(symbol, maxResults).Where(item => MeetsMinConfidence(item.Edge, minConfidence)).ToArray();
+            var fileById = PreloadEvidenceFiles(service, evidence, implementations.Select(item => item.Edge));
+            var relations = implementations.Select(item => ToRelation("implemented-by", symbol, item.Symbol, null, item.Edge, service, evidence, preloadedFileById: fileById))
                 .ToArray();
             if (json) return new QueryResponse(SchemaVersion(evidence), query, [ToMatch(symbol)], relations);
             Console.WriteLine(ToDisplay(symbol));
@@ -352,9 +352,9 @@ public static partial class Program
     {
         return await RunResolvedAsync(query, root, maxResults, json, evidence, minConfidence, callableOnly: false, (service, symbol) =>
         {
-            var impact = service.Impact(symbol, depth, maxResults, profile);
-            var relations = impact.Select(item => ToRelation("impact", item.Symbol, symbol, item.Depth, item.Via, service, evidence))
-                .Where(relation => relation.Confidence is null || relation.Confidence >= minConfidence)
+            var impact = service.Impact(symbol, depth, maxResults, profile).Where(item => MeetsMinConfidence(item.Via, minConfidence)).ToArray();
+            var fileById = PreloadEvidenceFiles(service, evidence, impact.Select(item => item.Via));
+            var relations = impact.Select(item => ToRelation("impact", item.Symbol, symbol, item.Depth, item.Via, service, evidence, preloadedFileById: fileById))
                 .ToArray();
             if (json) return new QueryResponse(SchemaVersion(evidence), query, [ToMatch(symbol)], relations);
             Console.WriteLine(ToDisplay(symbol));
@@ -481,19 +481,15 @@ public static partial class Program
             await using var service = loaded.Service;
             var stale = loaded.Stale;
             var matches = service.Find(task, maxResults);
-            var relations = new List<QueryRelation>();
+            var relationItems = new List<(string Kind, IndexedSymbol Source, IndexedSymbol Target, int? Depth, IndexedEdge Edge)>();
             foreach (var match in matches.Take(Math.Min(3, maxResults)))
             {
-                relations.AddRange(service.CallerRelations(match, 5)
-                    .Select(item => ToRelation("caller", item.Symbol, match, null, item.Edge, service, evidence))
-                    .Where(relation => relation.Confidence is null || relation.Confidence >= minConfidence));
-                relations.AddRange(service.CalleeRelations(match, 1, 5)
-                    .Select(item => ToRelation("callee", match, item.Symbol, null, item.Edge, service, evidence))
-                    .Where(relation => relation.Confidence is null || relation.Confidence >= minConfidence));
-                relations.AddRange(service.ImplementationRelations(match, 5)
-                    .Select(item => ToRelation("implemented-by", match, item.Symbol, null, item.Edge, service, evidence))
-                    .Where(relation => relation.Confidence is null || relation.Confidence >= minConfidence));
+                relationItems.AddRange(service.CallerRelations(match, 5).Where(item => MeetsMinConfidence(item.Edge, minConfidence)).Select(item => ("caller", item.Symbol, match, (int?)null, item.Edge)));
+                relationItems.AddRange(service.CalleeRelations(match, 1, 5).Where(item => MeetsMinConfidence(item.Edge, minConfidence)).Select(item => ("callee", match, item.Symbol, (int?)null, item.Edge)));
+                relationItems.AddRange(service.ImplementationRelations(match, 5).Where(item => MeetsMinConfidence(item.Edge, minConfidence)).Select(item => ("implemented-by", match, item.Symbol, (int?)null, item.Edge)));
             }
+            var fileById = PreloadEvidenceFiles(service, evidence, relationItems.Select(item => item.Edge));
+            var relations = relationItems.Select(item => ToRelation(item.Kind, item.Source, item.Target, item.Depth, item.Edge, service, evidence, preloadedFileById: fileById)).ToList();
             var map = service.BuildMap(matches.FirstOrDefault()?.Name ?? task, project: null, tokenBudget);
             if (json)
             {
@@ -775,15 +771,14 @@ public static partial class Program
         string? evidenceLabel = null;
         if (evidence)
         {
-
-
-
-
-            var fileById = preloadedFileById ?? service.Files().ToDictionary(file => file.Id, StringComparer.Ordinal);
-            var evidenceValue = explicitEvidence
-                ?? RelationEvidenceMapper.FromEdge(edge, source, target,
+            var evidenceValue = explicitEvidence;
+            if (evidenceValue is null)
+            {
+                var fileById = preloadedFileById ?? service.Files().ToDictionary(file => file.Id, StringComparer.Ordinal);
+                evidenceValue = RelationEvidenceMapper.FromEdge(edge, source, target,
                     edge.SourceFileId is not null && fileById.TryGetValue(edge.SourceFileId, out var file) ? file.RelativePath : null,
                     edge.Line);
+            }
             evidenceLabel = evidenceValue.Evidence;
             location = evidenceValue.File is null && evidenceValue.Line is null
                 ? null
@@ -802,6 +797,15 @@ public static partial class Program
             location,
             evidenceLabel);
     }
+
+    private static bool MeetsMinConfidence(IndexedEdge edge, double minConfidence) =>
+        edge.Confidence is null || edge.Confidence >= minConfidence;
+
+    private static IReadOnlyDictionary<string, IndexedFile>? PreloadEvidenceFiles(
+        CodeMapQueryService service,
+        bool evidence,
+        IEnumerable<IndexedEdge> edges) =>
+        evidence ? service.FindFilesByIds(edges.Select(edge => edge.SourceFileId).OfType<string>()) : null;
 
     private static void WriteJson<T>(T value) => Console.WriteLine(JsonSerializer.Serialize(value, JsonOptions));
 

@@ -130,6 +130,42 @@ public sealed class CliFollowUpTests
         }
     }
 
+    [Fact(Timeout = 90_000)]
+    public async Task Diff_MinConfidenceFiltersDisplayedImpactWithoutChangingRisk()
+    {
+        var workingDirectory = CopyFixture("WebFixture");
+        try
+        {
+            RunGit(workingDirectory, "init", "-q");
+            RunGit(workingDirectory, "add", ".");
+            RunGit(workingDirectory, "-c", "user.name=CodeMap Tests", "-c", "user.email=codemap@example.invalid", "commit", "-qm", "baseline");
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+
+            await File.AppendAllTextAsync(Path.Combine(workingDirectory, "save.ts"), Environment.NewLine + "// changed");
+
+            var unfiltered = await CliProcess.RunAsync($"diff HEAD --root \"{workingDirectory}\" --json");
+            var filteredJson = await CliProcess.RunAsync($"diff HEAD --root \"{workingDirectory}\" --json --min-confidence=1");
+            var filteredText = await CliProcess.RunAsync($"diff HEAD --root \"{workingDirectory}\" --min-confidence=1");
+
+            Assert.Equal(0, unfiltered.ExitCode);
+            Assert.Equal(0, filteredJson.ExitCode);
+            Assert.Equal(0, filteredText.ExitCode);
+            using var unfilteredDocument = JsonDocument.Parse(unfiltered.StdOut);
+            using var filteredDocument = JsonDocument.Parse(filteredJson.StdOut);
+            var unfilteredRelations = unfilteredDocument.RootElement.GetProperty("relations").EnumerateArray().ToArray();
+            var filteredRelations = filteredDocument.RootElement.GetProperty("relations").EnumerateArray().ToArray();
+
+            Assert.NotEmpty(unfilteredRelations);
+            Assert.Empty(filteredRelations);
+            AssertRiskEqual(unfilteredDocument.RootElement.GetProperty("risk"), filteredDocument.RootElement.GetProperty("risk"));
+            Assert.DoesNotContain("<-", filteredText.StdOut);
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
     private static string RenderImpactHoseSource(int callerCount)
     {
         var methods = string.Join(Environment.NewLine, Enumerable.Range(0, callerCount)
@@ -796,6 +832,41 @@ public sealed class CliFollowUpTests
             var relation = relations[0];
             Assert.True(relation.TryGetProperty("evidence", out _));
             Assert.True(relation.TryGetProperty("location", out _));
+        }
+        finally
+        {
+            CleanUp(workingDirectory);
+        }
+    }
+
+    [Fact(Timeout = 90_000)]
+    public async Task Callees_MinConfidence_AppliesEquallyToTextAndJson()
+    {
+        var workingDirectory = CopyFixture("WebFixture");
+        try
+        {
+            await new IncrementalCodeMapIndexer().IndexAsync(workingDirectory, force: true, CancellationToken.None);
+            var unfiltered = await CliProcess.RunAsync($"callees \"app.ts::bind\" --root \"{workingDirectory}\" --json");
+            var filteredJson = await CliProcess.RunAsync($"callees \"app.ts::bind\" --root \"{workingDirectory}\" --json --min-confidence=1");
+            var filteredText = await CliProcess.RunAsync($"callees \"app.ts::bind\" --root \"{workingDirectory}\" --min-confidence=1");
+
+            Assert.Equal(0, unfiltered.ExitCode);
+            Assert.Equal(0, filteredJson.ExitCode);
+            Assert.Equal(0, filteredText.ExitCode);
+            using var unfilteredDocument = JsonDocument.Parse(unfiltered.StdOut);
+            using var filteredDocument = JsonDocument.Parse(filteredJson.StdOut);
+            var unfilteredTargets = unfilteredDocument.RootElement.GetProperty("relations").EnumerateArray()
+                .Select(relation => relation.GetProperty("target").GetString()!)
+                .ToArray();
+            var filteredTargets = filteredDocument.RootElement.GetProperty("relations").EnumerateArray()
+                .Select(relation => relation.GetProperty("target").GetString()!)
+                .ToArray();
+
+            Assert.True(filteredTargets.Length < unfilteredTargets.Length);
+            foreach (var target in filteredTargets)
+                Assert.Contains(target, filteredText.StdOut);
+            foreach (var target in unfilteredTargets.Except(filteredTargets))
+                Assert.DoesNotContain(target, filteredText.StdOut);
         }
         finally
         {
