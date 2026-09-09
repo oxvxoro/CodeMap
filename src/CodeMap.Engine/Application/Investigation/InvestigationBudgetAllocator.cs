@@ -23,8 +23,9 @@ public sealed class InvestigationBudgetAllocator
         var excluded = new List<InvestigationCandidate>();
         var estimated = 0;
 
-        foreach (var candidate in ranked)
+        for (var index = 0; index < ranked.Count; index++)
         {
+            var candidate = ranked[index];
             var cost = Math.Max(1, candidate.EstimatedCost);
             if (estimated + cost <= budget)
             {
@@ -33,7 +34,8 @@ public sealed class InvestigationBudgetAllocator
             }
             else
             {
-                excluded.Add(candidate);
+                excluded.AddRange(ranked.Skip(index));
+                break;
             }
         }
 

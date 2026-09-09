@@ -45,11 +45,10 @@ public sealed class CodeMapSemanticSliceService
         ArgumentNullException.ThrowIfNull(request);
         if (string.IsNullOrWhiteSpace(request.Query))
             throw new SemanticSliceException("query_failed", "A symbol query is required.");
-        if (!await _indexer.IsUpToDateAsync(projectRoot, cancellationToken))
+        var databasePath = CodeMapIndexLocator.FindDatabase(projectRoot);
+        var root = CodeMapIndexLocator.ResolveIndexRoot(databasePath);
+        if (!await _indexer.IsUpToDateAsync(root, cancellationToken))
             throw new SemanticSliceException("semantic_slice_stale_index", "Semantic slice requires a fresh index. Run: codemap update");
-
-        var root = Path.GetFullPath(projectRoot);
-        var databasePath = Path.Combine(root, ".codemap", "index.db");
         var graph = await new CodeMapQueryStore(databasePath).LoadAsync(cancellationToken)
             ?? throw new SemanticSliceException("query_failed", "The index could not be opened.");
         var resolved = new CodeMapQueryService(graph).ResolveSymbol(request.Query, callableOnly: false, maxResults: 20);
@@ -76,7 +75,7 @@ public sealed class CodeMapSemanticSliceService
         if (model is null)
             throw new SemanticSliceException("source_not_found", "Could not load the symbol source document.");
         var analysis = _analyzer.Analyze(model, symbol, request, cancellationToken);
-        if (!await _indexer.IsUpToDateAsync(projectRoot, cancellationToken))
+        if (!await _indexer.IsUpToDateAsync(root, cancellationToken))
             throw new SemanticSliceException("semantic_slice_stale_index", "Source changed while semantic slice was being computed. Run: codemap update");
         string? source = null;
         if (request.IncludeSource)

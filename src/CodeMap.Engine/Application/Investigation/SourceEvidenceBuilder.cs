@@ -17,23 +17,25 @@ internal sealed class SourceEvidenceBuilder
         var usedTokens = 0;
         foreach (var candidate in selected)
         {
-            var line = candidate.Via?.Line ?? candidate.Symbol.StartLine;
+            var location = candidate.EvidenceLocation;
+            var line = location?.StartLine ?? candidate.Via?.Line ?? candidate.Symbol.StartLine;
             if (line is null)
                 continue;
             var start = mode == SourceEvidenceMode.Scope
-                ? candidate.Symbol.StartLine ?? line.Value
+                ? location?.StartLine ?? candidate.Symbol.StartLine ?? line.Value
                 : Math.Max(1, line.Value - 2);
             var end = mode == SourceEvidenceMode.Scope
-                ? candidate.Symbol.EndLine ?? line.Value
-                : Math.Max(start, (candidate.Via?.EndLine ?? line.Value) + 2);
-            var text = fileAccessor.Read(candidate.Symbol.RelativePath, start, end);
+                ? location?.EndLine ?? candidate.Symbol.EndLine ?? line.Value
+                : Math.Max(start, (location?.EndLine ?? candidate.Via?.EndLine ?? line.Value) + 2);
+            var file = location?.File ?? candidate.Symbol.RelativePath;
+            var text = fileAccessor.Read(file, start, end);
             if (text is null)
                 continue;
             var cost = (int)Math.Ceiling(text.Length / 4d);
             if (usedTokens + cost > remainingTokenBudget)
                 break;
             spans.Add(new InvestigationSourceSpan(
-                candidate.Symbol.RelativePath,
+                file,
                 start,
                 end,
                 text,

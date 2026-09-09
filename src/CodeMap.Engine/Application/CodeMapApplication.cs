@@ -169,7 +169,7 @@ public sealed class CodeMapApplication
             return ApplicationResponse<InvestigationResult>.Failure(
                 new("query_failed", "source-mode must be one of: none, minimal, scope."));
 
-        return await WithServiceAsync(request.Root, cancellationToken, async (service, stale) =>
+        return await WithInvestigationServiceAsync(request.Root, cancellationToken, async (service, stale, indexRoot) =>
         {
             var resolution = service.ResolveSymbol(request.Query, callableOnly: false, request.MaxResults);
             if (resolution.Matches.Count == 0)
@@ -187,37 +187,45 @@ public sealed class CodeMapApplication
                         Array.Empty<InvestigationSourceSpan>()));
 
             var root = resolution.Matches[0];
-            var queryRoot = Path.GetFullPath(string.IsNullOrWhiteSpace(request.Root)
-                ? Directory.GetCurrentDirectory()
-                : request.Root);
             var overrides = new InvestigationOverrides(
                 request.MaxResults,
                 request.Depth ?? (request.Goal == InvestigationGoal.Trace ? 4 : request.Goal == InvestigationGoal.Impact ? 2 : 1),
                 request.MinConfidence,
                 request.IncludeHeuristic,
                 request.TokenBudget,
-                queryRoot);
+                indexRoot);
             var orchestrator = new InvestigationOrchestrator(
                 new InvestigationRankingPolicy(),
                 new InvestigationBudgetAllocator(),
                 goal => InvestigationProfiles.Create(goal, SliceForInvestigationAsync));
             var result = await orchestrator.RunAsync(request.Goal, service, root, overrides, cancellationToken);
+            var files = service.FindFilesByIds(result.Selection.Selected
+                .Concat(result.Selection.Excluded)
+                .Select(candidate => candidate.Via?.SourceFileId)
+                .OfType<string>());
+            var locatedCandidates = result.Candidates.Select(candidate => AttachEvidenceLocation(candidate, files)).ToArray();
+            var locatedSelection = result.Selection with
+            {
+                Selected = result.Selection.Selected.Select(candidate => AttachEvidenceLocation(candidate, files)).ToArray(),
+                Excluded = result.Selection.Excluded.Select(candidate => AttachEvidenceLocation(candidate, files)).ToArray()
+            };
+            var locatedResult = result with { Candidates = locatedCandidates, Selection = locatedSelection };
             var coverage = new CoverageAggregator().Aggregate(
-                result.ProviderStatuses,
-                result.Selection.Selected.Concat(result.Selection.Excluded).ToArray(),
-                result.Selection.Selected,
+                locatedResult.ProviderStatuses,
+                locatedResult.Selection.Selected.Concat(locatedResult.Selection.Excluded).ToArray(),
+                locatedResult.Selection.Selected,
                 service,
                 root,
                 request);
             var sourceMode = Enum.Parse<SourceEvidenceMode>(request.SourceMode, ignoreCase: true);
             var sourceSpans = new SourceEvidenceBuilder().BuildSpans(
-                result.Candidates,
+                locatedResult.Candidates,
                 sourceMode,
-                Math.Max(0, request.TokenBudget - result.Selection.EstimatedTokens),
-                new FileTextAccessor(queryRoot));
+                Math.Max(0, request.TokenBudget - locatedResult.Selection.EstimatedTokens),
+                new FileTextAccessor(indexRoot));
             var response = new InvestigationResponse(1, request.Query, request.Goal, root, false, Array.Empty<IndexedSymbol>());
             return ApplicationResponse<InvestigationResult>.Success(
-                new InvestigationResult(response, result.Candidates, result.Selection, coverage, sourceSpans), stale);
+                new InvestigationResult(response, locatedResult.Candidates, locatedResult.Selection, coverage, sourceSpans), stale);
         });
 
         async Task<SemanticSliceResult> SliceForInvestigationAsync(
@@ -313,6 +321,67 @@ public sealed class CodeMapApplication
         {
             return ApplicationResponse<T>.Failure(Classify(exception));
         }
+    }
+
+    private async Task<ApplicationResponse<T>> WithInvestigationServiceAsync<T>(
+        string? requestedRoot,
+        CancellationToken cancellationToken,
+        Func<ICodeMapGraphReader, bool, string, Task<ApplicationResponse<T>>> action)
+    {
+        try
+        {
+            var queryRoot = Path.GetFullPath(string.IsNullOrWhiteSpace(requestedRoot)
+                ? Directory.GetCurrentDirectory()
+                : requestedRoot);
+            var database = CodeMapIndexLocator.FindDatabase(queryRoot);
+            var indexRoot = CodeMapIndexLocator.ResolveIndexRoot(database);
+            var stale = _freshness is not null
+                && await CodeMapIndexLocator.IsStaleAsync(
+                    database,
+                    cancellationToken,
+                    _freshness.IsUpToDateAsync);
+            await using var reader = await _graphReaderFactory(database, cancellationToken);
+            return await action(reader, stale, indexRoot);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return ApplicationResponse<T>.Failure(Classify(exception));
+        }
+    }
+
+    private static InvestigationCandidate AttachEvidenceLocation(
+        InvestigationCandidate candidate,
+        IReadOnlyDictionary<string, IndexedFile> files)
+    {
+        if (candidate.LocalEvidence is not null || candidate.Via?.SourceFileId is not { } fileId)
+        {
+            return candidate.EvidenceLocation is not null
+                ? candidate
+                : candidate with
+                {
+                    EvidenceLocation = new InvestigationEvidenceLocation(
+                        candidate.Symbol.RelativePath,
+                        candidate.Symbol.StartLine,
+                        null,
+                        candidate.Symbol.EndLine,
+                        null,
+                        InvestigationEvidenceLocationOrigin.SymbolDeclaration)
+                };
+        }
+
+        if (!files.TryGetValue(fileId, out var file))
+            return candidate;
+
+        return candidate with
+        {
+            EvidenceLocation = new InvestigationEvidenceLocation(
+                file.RelativePath,
+                candidate.Via.Line,
+                candidate.Via.StartColumn,
+                candidate.Via.EndLine,
+                candidate.Via.EndColumn,
+                InvestigationEvidenceLocationOrigin.EdgeSource)
+        };
     }
 
     private async Task<ApplicationResponse<T>> WithServiceAsync<T>(

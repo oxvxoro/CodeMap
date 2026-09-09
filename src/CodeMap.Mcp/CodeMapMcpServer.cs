@@ -367,11 +367,19 @@ public static class CodeMapTools
                 confidence = candidate.Via.Confidence,
                 location = candidate.Via.SourceFileId is null && candidate.Via.Line is null
                     ? null
-                    : new { file = candidate.Symbol.RelativePath, line = candidate.Via.Line }
+                    : new
+                    {
+                        file = candidate.EvidenceLocation?.File ?? candidate.Symbol.RelativePath,
+                        startLine = candidate.EvidenceLocation?.StartLine ?? candidate.Via.Line,
+                        startColumn = candidate.EvidenceLocation?.StartColumn ?? candidate.Via.StartColumn,
+                        endLine = candidate.EvidenceLocation?.EndLine ?? candidate.Via.EndLine,
+                        endColumn = candidate.EvidenceLocation?.EndColumn ?? candidate.Via.EndColumn
+                    }
             },
             depth = candidate.Depth,
             provider = candidate.Provider,
-            alsoFoundBy = candidate.AlsoFoundBy
+            alsoFoundBy = candidate.AlsoFoundBy,
+            localEvidence = candidate.LocalEvidence
         };
     }
 

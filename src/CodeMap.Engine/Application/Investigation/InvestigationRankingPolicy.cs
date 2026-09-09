@@ -34,12 +34,16 @@ public sealed class InvestigationRankingPolicy
             .OrderByDescending(candidate => candidate.ProfileRelevance)
             .ThenByDescending(candidate => candidate.CertaintyTier)
             .ThenBy(candidate => candidate.Depth)
+            .ThenByDescending(candidate => candidate.Confidence ?? 1.0)
+            .ThenBy(candidate => Math.Max(1, candidate.EstimatedCost))
             .ThenBy(candidate => candidate.Symbol.Id, StringComparer.Ordinal)
             .ToArray();
     }
 
     public static double GetRelevance(InvestigationGoal goal, InvestigationCandidate candidate) =>
-        candidate.Via is not null && Relevance.TryGetValue((goal, candidate.Via.Kind), out var value)
+        goal == InvestigationGoal.Debug && candidate.LocalEvidence is not null
+            ? 1.10
+            : candidate.Via is not null && Relevance.TryGetValue((goal, candidate.Via.Kind), out var value)
             ? value
             : 0.5;
 }

@@ -24,13 +24,24 @@ internal sealed class LocalSliceProvider(
         {
             var result = await slice(root, overrides.ProjectRoot, cancellationToken);
             var candidates = result.Items
-                .Where(item => !string.IsNullOrWhiteSpace(item.Symbol))
-                .SelectMany(item => reader.Find(item.Symbol!, 1).Select(symbol => new InvestigationCandidate(
-                    symbol, null, 1, "localSlice", CertaintyTier.Semantic, null, 0,
-                    InvestigationCandidate.EstimateCost(symbol, null))))
+                .Select(item => new LocalSliceEvidence(
+                    result.Scope.SymbolId,
+                    item.Id,
+                    item.Kind,
+                    item.Symbol,
+                    item.Display,
+                    result.Scope.File,
+                    item.Location,
+                    result.Dependencies
+                        .Where(dependency => dependency.Source == item.Id || dependency.Target == item.Id)
+                        .ToArray()))
+                .Select(evidence => InvestigationCandidate.FromLocalSlice(root, evidence))
                 .Take(overrides.MaxResults)
                 .ToArray();
-            return new(candidates, ProviderCoverageStatus.Complete(Kind, candidates.Length));
+            var status = result.Truncated
+                ? ProviderCoverageStatus.Partial(Kind, "max_results", candidates.Length)
+                : ProviderCoverageStatus.Complete(Kind, candidates.Length);
+            return new(candidates, status);
         }
         catch (SemanticSliceException exception) when (exception.Code is "unsupported_language" or "unsupported_symbol_kind" or "unsupported_scope")
         {

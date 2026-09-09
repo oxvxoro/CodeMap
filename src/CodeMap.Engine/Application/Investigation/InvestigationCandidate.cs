@@ -13,6 +13,8 @@ public sealed record InvestigationCandidate(
     int EstimatedCost)
 {
     public IReadOnlyList<string> AlsoFoundBy { get; init; } = Array.Empty<string>();
+    public LocalSliceEvidence? LocalEvidence { get; init; }
+    public InvestigationEvidenceLocation? EvidenceLocation { get; init; }
 
     /// <summary>Confidence is an evidence score, not a calibrated probability.</summary>
     public static InvestigationCandidate FromRelation(IndexedRelation relation, int depth, string provider, double relevance = 0)
@@ -31,4 +33,27 @@ public sealed record InvestigationCandidate(
 
     public static int EstimateCost(IndexedSymbol symbol, IndexedEdge? edge) =>
         Math.Max(1, (symbol.DisplayName.Length + (edge?.Kind.ToString().Length ?? 0) + 12 + 3) / 4);
+
+    public static InvestigationCandidate FromLocalSlice(
+        IndexedSymbol scope,
+        LocalSliceEvidence evidence) =>
+        new(
+            scope,
+            null,
+            1,
+            "localSlice",
+            CertaintyTier.Semantic,
+            null,
+            0,
+            Math.Max(1, (evidence.Display.Length + evidence.File.Length + 12) / 4))
+        {
+            LocalEvidence = evidence,
+            EvidenceLocation = new InvestigationEvidenceLocation(
+                evidence.File,
+                evidence.Location.StartLine,
+                evidence.Location.StartColumn,
+                evidence.Location.EndLine,
+                evidence.Location.EndColumn,
+                InvestigationEvidenceLocationOrigin.LocalSlice)
+        };
 }
