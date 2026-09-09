@@ -1,0 +1,70 @@
+name: Release validation
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet restore CodeMap.slnx
+      - run: dotnet build CodeMap.slnx --no-restore -warnaserror
+      - run: dotnet test CodeMap.slnx --no-build --logger "trx;LogFileName=release.trx" --results-directory artifacts/release-test-results
+      - run: dotnet pack src/CodeMap.Cli/CodeMap.Cli.csproj -c Release --no-restore -o artifacts/packages
+      - name: Package smoke
+        shell: bash
+        run: |
+          export DOTNET_CLI_HOME="$RUNNER_TEMP/codemap-dotnet"
+          dotnet tool install --global --add-source "$GITHUB_WORKSPACE/artifacts/packages" CodeMap.Cli
+          codemap version
+          fixture="$RUNNER_TEMP/codemap-smoke"
+          mkdir -p "$fixture"
+          cat > "$fixture/Smoke.csproj" <<'EOF'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+          </Project>
+          EOF
+          cat > "$fixture/Smoke.cs" <<'EOF'
+          public static class Smoke { public static int Greeter() => 1; }
+          EOF
+          codemap index "$fixture"
+          codemap find Greeter --root "$fixture" --json
+          codemap status "$fixture" --json
+      - name: MCP startup smoke
+        shell: bash
+        run: |
+          export DOTNET_CLI_HOME="$RUNNER_TEMP/codemap-dotnet"
+          timeout 10s codemap mcp --root "$RUNNER_TEMP/codemap-smoke" || test $? -eq 124
+      - name: Schema documentation check
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          files = list(Path('docs').rglob('*.schema.json'))
+          assert files, 'no JSON schema files found'
+          for path in files:
+              json.loads(path.read_text())
+          PY
+      - name: Write release benchmark summary
+        shell: bash
+        run: |
+          mkdir -p artifacts/benchmark
+          {
+            echo "# Release benchmark summary"
+            echo
+            echo "- commit: $(git rev-parse HEAD)"
+            echo "- full benchmark suite: scheduled by benchmark workflow"
+            echo "- correctness gate: release tests and package smoke passed"
+          } > artifacts/benchmark/summary.md
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-validation
+          path: artifacts

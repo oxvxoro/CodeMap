@@ -299,7 +299,7 @@ public sealed class IncrementalUpdateTests
             var state = await File.ReadAllTextAsync(Path.Combine(workingDirectory, ".codemap", "state.json"));
             using var stateDocument = JsonDocument.Parse(state);
             Assert.Equal(SqliteCodeMapStore.SchemaVersion, stateDocument.RootElement.GetProperty("schemaVersion").GetString());
-            Assert.Equal(3, stateDocument.RootElement.GetProperty("indexFormatVersion").GetInt32());
+            Assert.Equal(4, stateDocument.RootElement.GetProperty("indexFormatVersion").GetInt32());
             Assert.Equal(CSharpLanguageAnalyzer.AnalyzerVersion, stateDocument.RootElement.GetProperty("analyzerVersions").GetProperty("csharp").GetString());
             Assert.NotEmpty(stateDocument.RootElement.GetProperty("configHash").GetString()!);
             Assert.NotEmpty(stateDocument.RootElement.GetProperty("toolVersion").GetString()!);

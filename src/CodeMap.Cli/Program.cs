@@ -4,93 +4,36 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeMap.CSharp;
 using CodeMap.Core.Models;
+using CodeMap.Engine.Application;
 using CodeMap.Mcp;
 using CodeMap.Storage;
+using CodeMap.Cli.Presentation;
 
 namespace CodeMap.Cli;
 
 public static partial class Program
 {
-    private const int JsonSchemaVersion = 4;
-    private const int JsonSchemaVersionWithEvidence = 5;
-    private const int SemanticSliceSchemaVersion = 1;
+    private const int JsonSchemaVersion = CliSchemaVersions.Query;
+    private const int JsonSchemaVersionWithEvidence = CliSchemaVersions.QueryWithEvidence;
+    private const int SemanticSliceSchemaVersion = CliSchemaVersions.SemanticSlice;
     private const int DefaultMaxResults = 20;
     private const int DefaultDepth = 1;
     private const int DefaultMapTokens = 500;
     private static CancellationToken ShutdownToken { get; set; }
+    private static CodeMapApplication Application { get; } = new(new UncachedIndexFreshnessService());
 
-    public static async Task<int> Main(string[] args)
+    public static Task<int> Main(string[] args) => CliHost.RunAsync(args);
+
+    internal static RootCommand CreateRootCommand(CancellationToken shutdownToken)
     {
-        using var cancellation = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, eventArgs) =>
-        {
-            eventArgs.Cancel = true;
-            cancellation.Cancel();
-        };
-        ShutdownToken = cancellation.Token;
+        ShutdownToken = shutdownToken;
         var rootCommand = new RootCommand("CodeMap — local semantic code indexer and query CLI.");
+        CommandCatalog.Register(rootCommand);
 
-        var versionCommand = new Command("version", "Show version information.");
-        versionCommand.SetHandler(PrintVersion);
-        rootCommand.AddCommand(versionCommand);
-
-        var indexPath = new Argument<string>("path", () => Directory.GetCurrentDirectory(), "Repository, solution, or project path.") { Arity = ArgumentArity.ZeroOrOne };
-        var force = new Option<bool>("--force", "Rebuild the index even when an index already exists.");
-        var indexCommand = new Command("index", "Build a complete semantic index.");
-        indexCommand.AddArgument(indexPath);
-        indexCommand.AddOption(force);
-        indexCommand.SetHandler(async (string path, bool rebuild) => await RunIndexAsync(path, rebuild), indexPath, force);
-        rootCommand.AddCommand(indexCommand);
-
-        var updatePath = new Argument<string>("path", () => Directory.GetCurrentDirectory(), "Repository, solution, or project path.") { Arity = ArgumentArity.ZeroOrOne };
-        var updateCommand = new Command("update", "Update the index using content hashes.");
-        updateCommand.AddArgument(updatePath);
-        updateCommand.SetHandler(async (string path) => await RunUpdateAsync(path), updatePath);
-        rootCommand.AddCommand(updateCommand);
-        var scipCommand = new Command("scip", "Manage imported SCIP providers.");
-        AddScipImportCommand(scipCommand);
-        AddScipListCommand(scipCommand);
-        AddScipRemoveCommand(scipCommand);
-        rootCommand.AddCommand(scipCommand);
-
-        AddFindCommand(rootCommand);
-        AddPairRelationCommand(rootCommand);
-        AddRelationCommand(rootCommand, "refs", "Show references to a symbol.", RunRefsAsync);
-        AddRelationCommand(rootCommand, "callers", "Show callers of a method.", RunCallersAsync);
-        AddRelationCommand(rootCommand, "callees", "Show methods called by a method.", RunCalleesAsync, withDepth: true);
-        AddRelationCommand(rootCommand, "impl", "Show implementations of a type or method.", RunImplAsync);
-        AddImpactCommand(rootCommand);
-        AddDiffCommand(rootCommand);
-        AddCheckCommand(rootCommand);
-        AddWatchCommand(rootCommand);
-        AddStatusCommand(rootCommand);
-        AddReportCommand(rootCommand);
-        AddMcpCommand(rootCommand);
-        AddLspCommand(rootCommand);
-        AddMapCommand(rootCommand);
-        AddContextCommand(rootCommand);
-        AddFlowCommand(rootCommand);
-        AddSliceCommand(rootCommand);
-
-        var invocationCode = await rootCommand.InvokeAsync(args);
-
-
-        return Environment.ExitCode != 0 ? Environment.ExitCode : invocationCode;
+        return rootCommand;
     }
 
-    private static void AddFindCommand(RootCommand root)
-    {
-        var query = new Argument<string>("query", "Symbol name, qualified name, or partial query.");
-        var options = CreateQueryOptions();
-        var command = new Command("find", "Find symbols in the semantic index.");
-        command.AddArgument(query);
-        AddOptions(command, options, includeDepth: false);
-        command.SetHandler(async (string value, string? rootPath, int maxResults, bool json) =>
-            await RunFindAsync(value, rootPath, maxResults, json), query, options.Root, options.MaxResults, options.Json);
-        root.AddCommand(command);
-    }
-
-    private static void AddPairRelationCommand(RootCommand root)
+    internal static void AddPairRelationCommand(RootCommand root)
     {
         var source = new Argument<string>("source", "Source symbol name or qualified name.");
         var target = new Argument<string>("target", "Target symbol name or qualified name.");
@@ -118,7 +61,7 @@ public static partial class Program
         root.AddCommand(command);
     }
 
-    private static void AddRelationCommand(
+    internal static void AddRelationCommand(
         RootCommand root,
         string name,
         string description,
@@ -157,7 +100,7 @@ public static partial class Program
         root.AddCommand(command);
     }
 
-    private static void AddContextCommand(RootCommand root)
+    internal static void AddContextCommand(RootCommand root)
     {
         var task = new Argument<string>("task", "Symbol name, file hint, or short task description.");
         var options = CreateQueryOptions();
@@ -185,7 +128,7 @@ public static partial class Program
         root.AddCommand(command);
     }
 
-    private static void AddMapCommand(RootCommand root)
+    internal static void AddMapCommand(RootCommand root)
     {
         var focus = new Option<string?>("--focus", "Prefer symbols close to this name or graph neighborhood.");
         var project = new Option<string?>("--project", "Restrict the map to a project name.");
@@ -205,7 +148,7 @@ public static partial class Program
         root.AddCommand(command);
     }
 
-    private static void AddScipImportCommand(Command scip)
+    internal static void AddScipImportCommand(Command scip)
     {
         var artifact = new Argument<string>("artifact", "Path to the SCIP .scip artifact.");
         var name = new Option<string>("--name", "Stable provider name for this import.") { IsRequired = true };
@@ -223,7 +166,7 @@ public static partial class Program
         scip.AddCommand(command);
     }
 
-    private static void AddScipRemoveCommand(Command scip)
+    internal static void AddScipRemoveCommand(Command scip)
     {
         var name = new Argument<string>("name", "SCIP import name to remove.");
         var rootPath = new Option<string?>("--root", "Repository root containing the CodeMap index.");
@@ -234,7 +177,7 @@ public static partial class Program
         scip.AddCommand(remove);
     }
 
-    private static void AddScipListCommand(Command scip)
+    internal static void AddScipListCommand(Command scip)
     {
         var rootPath = new Option<string?>("--root", "Repository root containing the CodeMap index.");
         var json = new Option<bool>("--json", "Emit JSON provider registrations.");
@@ -245,7 +188,7 @@ public static partial class Program
         scip.AddCommand(list);
     }
 
-    private static void AddSliceCommand(RootCommand root)
+    internal static void AddSliceCommand(RootCommand root)
     {
         var query = new Argument<string>("query", "C# executable symbol to analyze.");
         var rootPath = new Option<string?>("--root", "Project root or directory containing .codemap/index.db.");
@@ -287,14 +230,14 @@ public static partial class Program
             command.AddOption(options.Depth);
     }
 
-    private static void PrintVersion()
+    internal static void PrintVersion()
     {
         var version = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
             ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "unknown";
         Console.WriteLine($"codemap {version}");
     }
 
-    private static async Task<int> RunIndexAsync(string path, bool force)
+    internal static async Task<int> RunIndexAsync(string path, bool force)
     {
         try
         {
@@ -313,7 +256,7 @@ public static partial class Program
         }
     }
 
-    private static async Task<int> RunUpdateAsync(string path)
+    internal static async Task<int> RunUpdateAsync(string path)
     {
         try
         {
@@ -336,10 +279,12 @@ public static partial class Program
     {
         try
         {
-            var loaded = await LoadQueryServiceAsync(root);
-            await using var service = loaded.Service;
-            var stale = loaded.Stale;
-            var matches = service.Find(query, maxResults);
+            var response = await Application.FindAsync(new FindRequest(query, root, maxResults), ShutdownToken);
+            if (!response.Succeeded)
+                return HandleApplicationError(response.Error!, json, response.Stale);
+            var result = response.Value!;
+            var matches = result.Matches;
+            var stale = response.Stale;
             if (json)
             {
                 var reason = matches.Count == 0 ? "no_matches" : null;
@@ -349,7 +294,7 @@ public static partial class Program
             {
                 WarnIfStale(stale);
                 foreach (var match in matches)
-                    WriteFindMatch(match, service);
+                    WriteFindMatch(match, result.Members.GetValueOrDefault(match.Id) ?? Array.Empty<IndexedSymbol>());
             }
             return Exit(matches.Count == 0 ? 2 : 0);
         }
@@ -447,7 +392,7 @@ public static partial class Program
         catch (Exception exception) { return HandleQueryError(exception, json, version: SemanticSliceSchemaVersion); }
     }
 
-    private static async Task<int> RunRefsAsync(string query, string? root, int maxResults, int depth, bool json, bool evidence, double minConfidence)
+    internal static async Task<int> RunRefsAsync(string query, string? root, int maxResults, int depth, bool json, bool evidence, double minConfidence)
     {
         return await RunResolvedAsync(query, root, maxResults, json, evidence, minConfidence, callableOnly: false, (service, symbol) =>
         {
@@ -466,7 +411,7 @@ public static partial class Program
         });
     }
 
-    private static async Task<int> RunCallersAsync(string query, string? root, int maxResults, int depth, bool json, bool evidence, double minConfidence)
+    internal static async Task<int> RunCallersAsync(string query, string? root, int maxResults, int depth, bool json, bool evidence, double minConfidence)
     {
         return await RunResolvedAsync(query, root, maxResults, json, evidence, minConfidence, callableOnly: true, (service, symbol) =>
         {
@@ -482,7 +427,7 @@ public static partial class Program
         });
     }
 
-    private static async Task<int> RunCalleesAsync(string query, string? root, int maxResults, int depth, bool json, bool evidence, double minConfidence)
+    internal static async Task<int> RunCalleesAsync(string query, string? root, int maxResults, int depth, bool json, bool evidence, double minConfidence)
     {
         return await RunResolvedAsync(query, root, maxResults, json, evidence, minConfidence, callableOnly: true, (service, symbol) =>
         {
@@ -498,7 +443,7 @@ public static partial class Program
         });
     }
 
-    private static async Task<int> RunImplAsync(string query, string? root, int maxResults, int depth, bool json, bool evidence, double minConfidence)
+    internal static async Task<int> RunImplAsync(string query, string? root, int maxResults, int depth, bool json, bool evidence, double minConfidence)
     {
         return await RunResolvedAsync(query, root, maxResults, json, evidence, minConfidence, callableOnly: false, (service, symbol) =>
         {
@@ -515,18 +460,32 @@ public static partial class Program
 
     private static async Task<int> RunImpactAsync(string query, string? root, int maxResults, int depth, bool json, bool evidence, double minConfidence, string profile = "code")
     {
-        return await RunResolvedAsync(query, root, maxResults, json, evidence, minConfidence, callableOnly: false, (service, symbol) =>
+        try
         {
-            var impact = service.Impact(symbol, depth, maxResults, profile).Where(item => MeetsMinConfidence(item.Via, minConfidence)).ToArray();
-            var fileById = PreloadEvidenceFiles(service, evidence, impact.Select(item => item.Via));
-            var relations = impact.Select(item => ToRelation("impact", item.Symbol, symbol, item.Depth, item.Via, service, evidence, preloadedFileById: fileById))
-                .ToArray();
-            if (json) return new QueryResponse(SchemaVersion(evidence), query, [ToMatch(symbol)], relations);
-            Console.WriteLine(ToDisplay(symbol));
-            foreach (var item in impact)
+            var response = await Application.ImpactAsync(new ImpactRequest(query, root, depth, maxResults, profile, minConfidence), ShutdownToken);
+            if (!response.Succeeded)
+                return HandleApplicationError(response.Error!, json, response.Stale);
+            var result = response.Value!;
+            var relations = result.Items.Select(item =>
+            {
+                var file = item.Via.SourceFileId is not null && result.Files.TryGetValue(item.Via.SourceFileId, out var indexedFile)
+                    ? indexedFile.RelativePath
+                    : null;
+                var relationEvidence = evidence ? RelationEvidenceMapper.FromEdge(item.Via, item.Symbol, result.Symbol, file, item.Via.Line) : null;
+                return ToApplicationRelation("impact", item.Symbol, result.Symbol, item.Depth, item.Via, evidence, relationEvidence);
+            }).ToArray();
+            if (json)
+            {
+                WriteJson(new QueryResponse(SchemaVersion(evidence), query, [ToMatch(result.Symbol)], relations, response.Stale));
+                return Exit(0);
+            }
+            WarnIfStale(response.Stale);
+            Console.WriteLine(ToDisplay(result.Symbol));
+            foreach (var item in result.Items)
                 Console.WriteLine($"<- {ToDisplay(item.Symbol)}");
-            return new QueryResponse(0, string.Empty, [], []);
-        });
+            return Exit(0);
+        }
+        catch (Exception exception) { return HandleQueryError(exception, json, evidence); }
     }
 
     private static async Task<int> RunPairRelationAsync(string sourceQuery, string targetQuery, string? root, int maxResults, bool evidence, double minConfidence, bool json)
@@ -796,6 +755,15 @@ public static partial class Program
         return Exit(1);
     }
 
+    private static int HandleApplicationError(QueryError error, bool json, bool stale = false)
+    {
+        if (json)
+            WriteJson(new ErrorResponse(SchemaVersion(false), new ErrorDto(error.Code, error.Message)));
+        else
+            Console.Error.WriteLine(error.Message);
+        return Exit(error.Code is "no_matches" or "ambiguous" ? CliExitCodes.NoMatchOrAmbiguous : CliExitCodes.Error);
+    }
+
     private static int Exit(int code)
     {
         Environment.ExitCode = code;
@@ -803,11 +771,10 @@ public static partial class Program
     }
 
 
-    private static void WriteFindMatch(IndexedSymbol symbol, CodeMapQueryService service)
+    private static void WriteFindMatch(IndexedSymbol symbol, IReadOnlyList<IndexedSymbol> members)
     {
         Console.WriteLine(symbol.Name);
         WriteSymbolFile(symbol);
-        var members = service.Members(symbol);
         if (members.Count > 0)
         {
             Console.WriteLine("members:");
@@ -815,6 +782,9 @@ public static partial class Program
         }
         Console.WriteLine();
     }
+
+    private static void WriteFindMatch(IndexedSymbol symbol, CodeMapQueryService service) =>
+        WriteFindMatch(symbol, service.Members(symbol));
 
     private static void WriteSymbolFile(IndexedSymbol symbol) =>
         Console.WriteLine($"  kind: {symbol.Kind.ToString().ToLowerInvariant()}\n  file: {symbol.RelativePath}:{symbol.StartLine ?? 0}");

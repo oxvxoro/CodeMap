@@ -30,12 +30,12 @@ public sealed class WebLanguageAnalyzer : ILanguageAnalyzer
     private static readonly Regex SelectorQuery = new(@"(?:querySelector(?:All)?|getElementById|getElementsByClassName)\s*\(\s*[""'](?<selector>[^""']+)[""']", RegexOptions.Compiled);
     private static readonly Regex HtmlAsset = new(@"<(?:script[^>]+src|link[^>]+href)\s*=\s*[""'](?<path>[^""']+)[""']", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    private const double DirectImportConfidence = 0.90;
-    private const double ReexportConfidence = 0.85;
-    private const double SameFileConfidence = 0.70;
-    private const double NameFallbackConfidence = 0.60;
-    private const double CssSelectorConfidence = 0.85;
-    private const double DomSelectorConfidence = 0.60;
+    private const double DirectImportConfidence = WebConfidencePolicy.DirectImport;
+    private const double ReexportConfidence = WebConfidencePolicy.Reexport;
+    private const double SameFileConfidence = WebConfidencePolicy.SameFile;
+    private const double NameFallbackConfidence = WebConfidencePolicy.NameFallback;
+    private const double CssSelectorConfidence = WebConfidencePolicy.CssSelector;
+    private const double DomSelectorConfidence = WebConfidencePolicy.DomSelector;
 
     private sealed record ExportValue(CodeNode Node, bool ViaReexport);
     private sealed record ResolvedBinding(CodeNode? Target, string? ModuleRelative, double Confidence, bool ViaReexport);
@@ -94,7 +94,7 @@ public sealed class WebLanguageAnalyzer : ILanguageAnalyzer
                 lineStartsByPath[pair.Key] = lineStarts;
                 var ast = WebScriptAstAnalyzer.Analyze(pair.Value, language, pair.Key);
                 astByPath[pair.Key] = ast;
-                if (ast.Symbols.Count > 0 || ast.Imports.Count > 0 || ast.HttpLiterals.Count > 0)
+                if (SelectScriptAnalysisMode(ast) == ScriptAnalysisMode.Ast)
                     ParseScriptFromAst(projectName, relative, pair.Value, lineStarts, language, ast, nodes, nodeIds, functionRanges);
                 else
                 {
@@ -121,6 +121,11 @@ public sealed class WebLanguageAnalyzer : ILanguageAnalyzer
         ResolveScriptRelations(root, files, maskedScripts, lineStartsByPath, astByPath, nodes, fileNodes, functionRanges, htmlBySelector, WebModuleResolver.Load(root), edges, edgeKeys, cancellationToken);
         return new AnalysisResult { Nodes = nodes, Edges = edges };
     }
+
+    internal static ScriptAnalysisMode SelectScriptAnalysisMode(WebScriptAstAnalyzer.ScriptAnalysis analysis) =>
+        analysis.Symbols.Count > 0 || analysis.Imports.Count > 0 || analysis.HttpLiterals.Count > 0
+            ? ScriptAnalysisMode.Ast
+            : ScriptAnalysisMode.RegexFallback;
 
     private static void ParseHtml(string project, string relative, string content, List<CodeNode> nodes, HashSet<string> ids)
     {

@@ -1,6 +1,7 @@
 using System.CommandLine;
 using System.Text.Json;
 using CodeMap.Core;
+using CodeMap.Engine.Application;
 using CodeMap.Mcp;
 using CodeMap.Storage;
 
@@ -8,7 +9,7 @@ namespace CodeMap.Cli;
 
 public static partial class Program
 {
-    private static void AddImpactCommand(RootCommand root)
+    internal static void AddImpactCommand(RootCommand root)
     {
         var query = new Argument<string?>("query", "Symbol name or qualified name.") { Arity = ArgumentArity.ZeroOrOne };
         var options = CreateQueryOptions();
@@ -69,7 +70,7 @@ public static partial class Program
         root.AddCommand(command);
     }
 
-    private static void AddDiffCommand(RootCommand root)
+    internal static void AddDiffCommand(RootCommand root)
     {
         var baseRev = new Argument<string>("base", "Git base revision to compare against.");
         var options = CreateQueryOptions();
@@ -95,7 +96,7 @@ public static partial class Program
         root.AddCommand(command);
     }
 
-    private static void AddCheckCommand(RootCommand root)
+    internal static void AddCheckCommand(RootCommand root)
     {
         var options = CreateQueryOptions();
         var command = new Command("check", "Run architecture quality checks.");
@@ -107,7 +108,7 @@ public static partial class Program
         root.AddCommand(command);
     }
 
-    private static void AddWatchCommand(RootCommand root)
+    internal static void AddWatchCommand(RootCommand root)
     {
         var path = new Argument<string>("path", () => Directory.GetCurrentDirectory(), "Repository root to watch.") { Arity = ArgumentArity.ZeroOrOne };
         var debounce = new Option<int>("--debounce-ms", () => 500, "Debounce interval before re-indexing.");
@@ -118,7 +119,7 @@ public static partial class Program
         root.AddCommand(command);
     }
 
-    private static void AddStatusCommand(RootCommand root)
+    internal static void AddStatusCommand(RootCommand root)
     {
         var path = new Argument<string>("path", () => Directory.GetCurrentDirectory(), "Repository, solution, project, or index path.")
         {
@@ -185,7 +186,7 @@ public static partial class Program
         }
     }
 
-    private static void AddReportCommand(RootCommand root)
+    internal static void AddReportCommand(RootCommand root)
     {
         var output = new Option<string>("--out", "Write an HTML report to this path.") { IsRequired = true };
         var rootPath = new Option<string?>("--root", "Project root or directory containing .codemap/index.db.");
@@ -196,7 +197,7 @@ public static partial class Program
         root.AddCommand(command);
     }
 
-    private static void AddFlowCommand(RootCommand root)
+    internal static void AddFlowCommand(RootCommand root)
     {
         var entry = new Argument<string>("entry", "Entry symbol/route name or qualified name.");
         var kind = new Option<string>("--kind", () => "all", "Traversal edge set: http, ui, or all.");
@@ -255,42 +256,29 @@ public static partial class Program
     {
         try
         {
-            var loaded = await LoadQueryServiceAsync(root);
-            await using var service = loaded.Service;
-            var stale = loaded.Stale;
-            var candidates = service.ResolveSymbol(entryQuery, callableOnly: false, maxResults).Matches;
-            if (candidates.Count == 0)
+            var response = await Application
+                .FlowAsync(new FlowRequest(entryQuery, kind, depth, root, maxResults, minConfidence), ShutdownToken);
+            if (!response.Succeeded)
             {
-                if (json) WriteJson(new QueryResponse(SchemaVersion(evidence), entryQuery, [], [], stale, "no_matches"));
-                else Console.Error.WriteLine($"No matches found for '{entryQuery}'.");
-                return Exit(2);
-            }
-            if (candidates.Count > 1)
-            {
-                if (json)
-                    WriteJson(new QueryResponse(SchemaVersion(evidence), entryQuery, candidates.Take(maxResults).Select(ToMatch).ToArray(), [], stale, "ambiguous"));
-                else
+                if (response.Error!.Code is "no_matches" or "ambiguous")
                 {
-                    Console.Error.WriteLine($"Ambiguous symbol '{entryQuery}'. Candidates:");
-                    foreach (var candidate in candidates.Take(maxResults)) Console.Error.WriteLine($"  {ToDisplay(candidate)}");
+                    if (json) WriteJson(new QueryResponse(SchemaVersion(evidence), entryQuery, [], [], response.Stale, response.Error.Code));
+                    else Console.Error.WriteLine(response.Error.Message);
+                    return Exit(2);
                 }
-                return Exit(2);
+                return HandleApplicationError(response.Error, json, response.Stale);
             }
-
-            var entrySymbol = candidates[0];
-            var flow = service.Flow(entrySymbol, kind, depth, maxResults, minConfidence);
-            var sourceById = service.FindByIds(flow.Select(item => item.Via.SourceId));
-            var fileById = evidence ? service.FindFilesByIds(flow.Select(item => item.Via.SourceFileId).OfType<string>()) : null;
-            var relations = flow.Select(item => ToFlowRelation(item, entrySymbol, sourceById, service, evidence, fileById)).ToArray();
+            var result = response.Value!;
+            var relations = result.Items.Select(item => ToApplicationFlowRelation(item, result, evidence)).ToArray();
 
             if (json)
             {
-                WriteJson(new QueryResponse(SchemaVersion(evidence), entryQuery, [ToMatch(entrySymbol)], relations, stale));
+                WriteJson(new QueryResponse(SchemaVersion(evidence), entryQuery, [ToMatch(result.Entry)], relations, response.Stale));
                 return Exit(0);
             }
 
-            WarnIfStale(stale);
-            Console.WriteLine(ToDisplay(entrySymbol));
+            WarnIfStale(response.Stale);
+            Console.WriteLine(ToDisplay(result.Entry));
             foreach (var relation in relations)
                 Console.WriteLine($"{relation.Depth}: {relation.EdgeKind} {relation.Source} -> {relation.Target}");
             return Exit(0);
@@ -316,7 +304,7 @@ public static partial class Program
         return ToRelation("flow", sourceSymbol, item.Symbol, item.Depth, item.Via, service, evidence, preloadedFileById: preloadedFileById);
     }
 
-    private static void AddMcpCommand(RootCommand root)
+    internal static void AddMcpCommand(RootCommand root)
     {
         var rootPath = new Option<string?>("--root", "Default project root for MCP tool calls.");
         var command = new Command("mcp", "Start the CodeMap MCP server on stdio.");
@@ -325,7 +313,7 @@ public static partial class Program
         root.AddCommand(command);
     }
 
-    private static void AddLspCommand(RootCommand root)
+    internal static void AddLspCommand(RootCommand root)
     {
         var rootPath = new Option<string?>("--root", "Default project root for LSP-style requests.");
         var command = new Command("lsp", "Start a minimal JSON-line query server on stdio.");
@@ -596,6 +584,7 @@ public static partial class Program
 
 
         using var freshnessCache = new CodeMapMcpContext(defaultRoot);
+        var application = new CodeMapApplication(freshnessCache);
         Console.Error.WriteLine("CodeMap LSP bridge ready. Send one JSON object per line.");
         while (!ShutdownToken.IsCancellationRequested)
         {
@@ -611,19 +600,19 @@ public static partial class Program
                     || evidenceElement.GetBoolean();
                 var response = command switch
                 {
-                    "find" => await LspFindAsync(document.RootElement.GetProperty("query").GetString()!, queryRoot, freshnessCache),
+                    "find" => await LspFindAsync(document.RootElement.GetProperty("query").GetString()!, queryRoot, application),
                     "impact" => await LspImpactAsync(
                         document.RootElement.GetProperty("query").GetString()!,
                         queryRoot,
-                        freshnessCache,
+                        application,
                         document.RootElement.TryGetProperty("profile", out var impactProfileElement) ? impactProfileElement.GetString() ?? "code" : "code",
                         evidence),
-                    "context" => await LspContextAsync(document.RootElement.GetProperty("task").GetString()!, queryRoot, freshnessCache),
+                    "context" => await LspContextAsync(document.RootElement.GetProperty("task").GetString()!, queryRoot, application),
                     "relation" => await LspRelationAsync(
                         document.RootElement.GetProperty("source").GetString()!,
                         document.RootElement.GetProperty("target").GetString()!,
                         queryRoot,
-                        freshnessCache,
+                        application,
                         document.RootElement.TryGetProperty("minConfidence", out var minConfidenceElement) ? minConfidenceElement.GetDouble() : 0,
                         evidence),
                     "flow" => await LspFlowAsync(
@@ -631,7 +620,7 @@ public static partial class Program
                         document.RootElement.TryGetProperty("kind", out var kindElement) ? kindElement.GetString() ?? "all" : "all",
                         document.RootElement.TryGetProperty("depth", out var depthElement) ? depthElement.GetInt32() : CodeMapQueryService.FlowDefaultDepth,
                         queryRoot,
-                        freshnessCache,
+                        application,
                         document.RootElement.TryGetProperty("minConfidence", out var flowMinConfidenceElement) ? flowMinConfidenceElement.GetDouble() : 0,
                         evidence),
                     _ => LspError("unknown_command", $"unknown command '{command}'")
@@ -646,111 +635,149 @@ public static partial class Program
         return Exit(0);
     }
 
-    private static async Task<object> LspFindAsync(string query, string? root, CodeMapMcpContext freshnessCache)
+    private static async Task<object> LspFindAsync(string query, string? root, CodeMapApplication application)
     {
-        var loaded = await LoadQueryServiceAsync(root, freshnessCache);
-        await using var service = loaded.Service;
-        var matches = service.Find(query, 20).Select(ToMatch).ToArray();
-        return new { version = 1, matches, relations = Array.Empty<QueryRelation>(), stale = loaded.Stale, reason = matches.Length == 0 ? "no_matches" : (string?)null };
+        var response = await application.FindAsync(new FindRequest(query, root, 20), ShutdownToken);
+        if (!response.Succeeded)
+            return LspError(response.Error!.Code, response.Error.Message, response.Stale);
+        var matches = response.Value!.Matches.Select(ToMatch).ToArray();
+        return new { version = 1, matches, relations = Array.Empty<QueryRelation>(), stale = response.Stale, reason = matches.Length == 0 ? "no_matches" : (string?)null };
     }
 
-    private static async Task<object> LspImpactAsync(string query, string? root, CodeMapMcpContext freshnessCache, string profile = "code", bool evidence = true)
+    private static async Task<object> LspImpactAsync(string query, string? root, CodeMapApplication application, string profile = "code", bool evidence = true)
     {
-        if (!CodeMapQueryService.IsValidImpactProfile(profile))
-            return LspError("query_failed", "profile must be one of: code, app.");
-        var loaded = await LoadQueryServiceAsync(root, freshnessCache);
-        await using var service = loaded.Service;
-        var resolution = service.ResolveSymbol(query, callableOnly: false, 20);
-        if (resolution.Matches.Count == 0) return LspNoMatches(query, loaded.Stale);
-        if (resolution.Matches.Count > 1) return LspAmbiguous(query, loaded.Stale);
-        var symbol = resolution.Matches[0];
-        var impact = service.Impact(symbol, 2, 20, profile);
+        var response = await application.ImpactAsync(new ImpactRequest(query, root, 2, 20, profile), ShutdownToken);
+        if (!response.Succeeded)
+            return response.Error!.Code == "no_matches"
+                ? LspNoMatches(query, response.Stale)
+                : LspQueryError(response.Error, query, response.Stale);
+        var result = response.Value!;
         return new
         {
             version = 1,
-            matches = new[] { ToMatch(symbol) },
-            relations = impact.Select(item => ToRelation("impact", item.Symbol, symbol, item.Depth, item.Via, service, evidence)).ToArray(),
-            stale = loaded.Stale,
+            matches = new[] { ToMatch(result.Symbol) },
+            relations = result.Items.Select(item => ToApplicationRelation("impact", item.Symbol, result.Symbol, item.Depth, item.Via, evidence)).ToArray(),
+            stale = response.Stale,
             reason = (string?)null
         };
     }
 
-    private static async Task<object> LspRelationAsync(string source, string target, string? root, CodeMapMcpContext freshnessCache, double minConfidence, bool evidence = true)
+    private static async Task<object> LspRelationAsync(string source, string target, string? root, CodeMapApplication application, double minConfidence, bool evidence = true)
     {
-        if (!RelationConfidence.IsValid(minConfidence))
-            return LspError("query_failed", RelationConfidence.InvalidMessage);
-
-        var loaded = await LoadQueryServiceAsync(root, freshnessCache);
-        await using var service = loaded.Service;
-        var sourceResolution = service.ResolveSymbol(source, callableOnly: false, 20);
-        if (sourceResolution.Matches.Count == 0)
-            return LspNoMatches(source, loaded.Stale);
-        if (sourceResolution.Matches.Count > 1)
-            return LspAmbiguous(source, loaded.Stale);
-        var sourceSymbol = sourceResolution.Matches[0];
-
-        var targetResolution = service.ResolveSymbol(target, callableOnly: false, 20);
-        if (targetResolution.Matches.Count == 0)
-            return LspNoMatches(target, loaded.Stale);
-        if (targetResolution.Matches.Count > 1)
-            return LspAmbiguous(target, loaded.Stale);
-        var targetSymbol = targetResolution.Matches[0];
-        var relations = service.Relations(sourceSymbol.Id, targetSymbol.Id, edgeKind: null, maxResults: 20, minConfidence)
-            .Select(item => ToRelation("relation", item.Source, item.Target, null, item.Edge, service, evidence, item.Evidence))
+        var response = await application.RelationsAsync(new RelationsRequest(source, target, root, null, 20, minConfidence), ShutdownToken);
+        if (!response.Succeeded)
+            return response.Error!.Code == "no_matches"
+                ? LspNoMatches(LspErrorQuery(response.Error, source, target), response.Stale)
+                : LspQueryError(response.Error, source, response.Stale);
+        var relations = response.Value!
+            .Select(item => ToRelation("relation", item, evidence))
             .ToArray();
+        var first = response.Value!.FirstOrDefault();
         return new
         {
             version = 1,
-            matches = new[] { ToMatch(sourceSymbol), ToMatch(targetSymbol) },
+            matches = first is null ? Array.Empty<MatchDto>() : new[] { ToMatch(first.Source), ToMatch(first.Target) },
             relations,
-            stale = loaded.Stale,
+            stale = response.Stale,
             reason = relations.Length == 0 ? "no_matches" : (string?)null
         };
     }
 
-    private static async Task<object> LspFlowAsync(string entry, string kind, int depth, string? root, CodeMapMcpContext freshnessCache, double minConfidence, bool evidence = true)
+    private static async Task<object> LspFlowAsync(string entry, string kind, int depth, string? root, CodeMapApplication application, double minConfidence, bool evidence = true)
     {
-        if (!RelationConfidence.IsValid(minConfidence))
-            return LspError("query_failed", RelationConfidence.InvalidMessage);
-        if (!CodeMapQueryService.IsValidFlowKind(kind))
-            return LspError("query_failed", "kind must be one of: http, ui, all.");
-        if (!CodeMapQueryService.IsValidFlowDepth(depth))
-            return LspError("query_failed", $"depth must be between {CodeMapQueryService.FlowMinDepth} and {CodeMapQueryService.FlowMaxDepth}.");
-
-        var loaded = await LoadQueryServiceAsync(root, freshnessCache);
-        await using var service = loaded.Service;
-        var resolution = service.ResolveSymbol(entry, callableOnly: false, 20);
-        if (resolution.Matches.Count == 0)
-            return LspNoMatches(entry, loaded.Stale);
-        if (resolution.Matches.Count > 1)
-            return LspAmbiguous(entry, loaded.Stale);
-        var entrySymbol = resolution.Matches[0];
-        var flow = service.Flow(entrySymbol, kind, depth, 20, minConfidence);
-        var sourceById = service.FindByIds(flow.Select(item => item.Via.SourceId));
-        var fileById = service.FindFilesByIds(flow.Select(item => item.Via.SourceFileId).OfType<string>());
+        var response = await application.FlowAsync(new FlowRequest(entry, kind, depth, root, 20, minConfidence), ShutdownToken);
+        if (!response.Succeeded)
+            return response.Error!.Code == "no_matches"
+                ? LspNoMatches(entry, response.Stale)
+                : LspQueryError(response.Error, entry, response.Stale);
+        var result = response.Value!;
         return new
         {
             version = 1,
-            matches = new[] { ToMatch(entrySymbol) },
-            relations = flow.Select(item => ToFlowRelation(item, entrySymbol, sourceById, service, evidence, fileById)).ToArray(),
-            stale = loaded.Stale,
-            reason = flow.Count == 0 ? "no_matches" : (string?)null
+            matches = new[] { ToMatch(result.Entry) },
+            relations = result.Items.Select(item => ToApplicationFlowRelation(item, result, evidence)).ToArray(),
+            stale = response.Stale,
+            reason = result.Items.Count == 0 ? "no_matches" : (string?)null
         };
     }
 
-    private static async Task<object> LspContextAsync(string task, string? root, CodeMapMcpContext freshnessCache)
+    private static async Task<object> LspContextAsync(string task, string? root, CodeMapApplication application)
     {
-
-
-        var loaded = await LoadQueryServiceAsync(root, freshnessCache);
-        await using var service = loaded.Service;
-        var matches = service.Find(task, 5);
-        var map = service.BuildMap(matches.FirstOrDefault()?.Name ?? task, null, 500);
-        return new { version = 1, matches = matches.Select(ToMatch).ToArray(), mapLines = map.Lines, stale = loaded.Stale, reason = matches.Count == 0 ? "no_matches" : (string?)null };
+        var response = await application.ContextAsync(new ContextRequest(task, root, 5, 500), ShutdownToken);
+        if (!response.Succeeded)
+            return LspError(response.Error!.Code, response.Error.Message, response.Stale);
+        var result = response.Value!;
+        return new { version = 1, matches = result.Matches.Select(ToMatch).ToArray(), mapLines = result.Map.Lines, stale = response.Stale, reason = result.Matches.Count == 0 ? "no_matches" : (string?)null };
     }
 
-    private static object LspError(string code, string message) =>
-        new { version = 1, error = new { code, message } };
+    private static object LspError(string code, string message, bool stale = false) =>
+        new { version = 1, error = new { code, message }, stale };
+
+    private static object LspQueryError(QueryError error, string fallbackQuery, bool stale)
+    {
+        var query = error.Message.StartsWith("Symbol query '", StringComparison.Ordinal)
+            ? error.Message[14..].Split('\'', 2)[0]
+            : fallbackQuery;
+        return new
+        {
+            version = 1,
+            error = new { code = error.Code, message = error.Message },
+            query,
+            stale,
+            reason = error.Code is "ambiguous" or "no_matches" ? error.Code : (string?)null
+        };
+    }
+
+    private static string LspErrorQuery(QueryError error, string first, string second) =>
+        error.Message.StartsWith("Symbol query '", StringComparison.Ordinal)
+            ? error.Message[14..].Split('\'', 2)[0]
+            : error.Message.Contains(second, StringComparison.Ordinal) ? second : first;
+
+    private static QueryRelation ToRelation(string kind, RelationQueryResult relation, bool evidence) =>
+        ToApplicationRelation(kind, relation.Source, relation.Target, null, relation.Edge, evidence, relation.Evidence);
+
+    private static QueryRelation ToApplicationRelation(
+        string kind,
+        IndexedSymbol source,
+        IndexedSymbol target,
+        int? depth,
+        IndexedEdge edge,
+        bool evidence,
+        RelationEvidence? explicitEvidence = null)
+    {
+        var evidenceValue = evidence
+            ? explicitEvidence ?? RelationEvidenceMapper.FromEdge(edge, source, target, null, edge.Line)
+            : null;
+        return new QueryRelation(
+            kind,
+            ToDisplay(source),
+            ToDisplay(target),
+            source.Id,
+            target.Id,
+            depth,
+            edge.Kind.ToString(),
+            edge.ResolutionKind.ToString().ToLowerInvariant(),
+            edge.Confidence,
+            evidenceValue is null || evidenceValue.File is null && evidenceValue.Line is null
+                ? null
+                : new EvidenceLocationDto(evidenceValue.File ?? string.Empty, evidenceValue.Line),
+            evidenceValue?.Evidence);
+    }
+
+    private static QueryRelation ToApplicationFlowRelation(
+        ImpactItem item,
+        ApplicationFlowResult result,
+        bool evidence)
+    {
+        var source = result.Sources.GetValueOrDefault(item.Via.SourceId) ?? result.Entry;
+        var file = item.Via.SourceFileId is not null && result.Files.TryGetValue(item.Via.SourceFileId, out var indexedFile)
+            ? indexedFile.RelativePath
+            : null;
+        var relationEvidence = evidence
+            ? RelationEvidenceMapper.FromEdge(item.Via, source, item.Symbol, file, item.Via.Line)
+            : null;
+        return ToApplicationRelation("flow", source, item.Symbol, item.Depth, item.Via, evidence, relationEvidence);
+    }
 
     private static object LspNoMatches(string query, bool stale) =>
         new { version = 1, matches = Array.Empty<MatchDto>(), relations = Array.Empty<QueryRelation>(), query, stale, reason = "no_matches" };

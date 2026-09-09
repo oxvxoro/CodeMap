@@ -1,4 +1,5 @@
 using CodeMap.Core.Models;
+using CodeMap.Storage.Queries;
 using Microsoft.Data.Sqlite;
 
 namespace CodeMap.Storage;
@@ -52,33 +53,17 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
         _ownsConnection = ownsConnection;
     }
 
-    public IReadOnlyList<IndexedSymbol> Find(string query, int maxResults)
+    /// <summary>
+    /// Finds symbols using exact, prefix, and contains tiers. Results are
+    /// deterministic and limited after ranking.
+    /// </summary>
+    public IReadOnlyList<IndexedSymbol> Find(string query, int maxResults = QueryLimits.DefaultMaxResults)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
         if (_connection is not null)
             return RankFindResults(QueryFindCandidates(query), query, maxResults);
 
-        var ranked = _graph.Symbols
-            .Select(symbol => (Symbol: symbol, Score: FindScore(symbol, query)))
-            .Where(item => item.Score >= 0)
-
-
-            .GroupBy(item => item.Score / 100)
-            .OrderByDescending(group => group.Key)
-            .FirstOrDefault()?
-            .ToArray() ?? Array.Empty<(IndexedSymbol Symbol, int Score)>();
-        return ranked
-            .OrderByDescending(item => item.Score)
-
-
-
-            .ThenBy(item => SqliteCodeMapStore.IsExternalProject(item.Symbol.Project))
-            .ThenBy(item => item.Symbol.QualifiedName, StringComparer.Ordinal)
-            .ThenBy(item => item.Symbol.Signature ?? string.Empty, StringComparer.Ordinal)
-            .ThenBy(item => item.Symbol.Id, StringComparer.Ordinal)
-            .Take(Math.Max(1, maxResults))
-            .Select(item => item.Symbol)
-            .ToArray();
+        return QueryRanking.Rank(_graph.Symbols, query, maxResults);
     }
 
     public IndexedSymbol? FindById(string id) =>
@@ -153,7 +138,9 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
         return QueryFilesByIds(distinctIds);
     }
 
-    public IReadOnlyList<IndexedSymbol> SymbolsInFiles(IReadOnlyCollection<string> relativePaths, int maxResults = 500)
+    public IReadOnlyList<IndexedSymbol> SymbolsInFiles(
+        IReadOnlyCollection<string> relativePaths,
+        int maxResults = QueryLimits.DefaultSymbolsInFilesMaxResults)
     {
         var normalized = relativePaths
             .Select(CodeMapPath.Normalize)
@@ -170,7 +157,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
             .Where(symbol => symbol.Kind is not (NodeKind.File or NodeKind.Namespace))
             .OrderBy(symbol => symbol.QualifiedName, StringComparer.Ordinal)
             .ThenBy(symbol => symbol.Id, StringComparer.Ordinal)
-            .Take(Math.Max(1, maxResults))
+            .Take(QueryLimits.NormalizeMaxResults(maxResults))
             .ToArray();
     }
 
@@ -191,8 +178,10 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
             var distinctRootIds = materializedRoots.Select(root => root.Id).Distinct(StringComparer.Ordinal);
             const int parametersPerRoot = 2;
             const int fixedParameterCount = 2;
-            var rootsPerSqliteBatch = Math.Max(1, (SqliteVariableChunkSize - fixedParameterCount) / parametersPerRoot);
-            foreach (var chunk in distinctRootIds.Chunk(rootsPerSqliteBatch))
+            foreach (var chunk in SqliteBatch.ChunkForVariables(
+                         distinctRootIds,
+                         variablesPerItem: parametersPerRoot,
+                         fixedVariables: fixedParameterCount))
             {
                 foreach (var item in QueryImpactUnion(chunk, depth, maxResults, profile))
                 {
@@ -233,7 +222,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
             .OrderBy(item => item.Depth)
             .ThenBy(item => item.Symbol.QualifiedName, StringComparer.Ordinal)
             .ThenBy(item => item.Symbol.Id, StringComparer.Ordinal)
-            .Take(Math.Max(1, maxResults))
+            .Take(QueryLimits.NormalizeMaxResults(maxResults))
             .ToArray();
     }
 
@@ -291,8 +280,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
             return matches as IndexedSymbol[] ?? matches.ToArray();
         if (matches.Any(symbol => string.Equals(symbol.Id, query, StringComparison.OrdinalIgnoreCase)))
             return matches as IndexedSymbol[] ?? matches.ToArray();
-        var sourceOnly = matches.Where(symbol => !SqliteCodeMapStore.IsExternalProject(symbol.Project)).ToArray();
-        return sourceOnly.Length > 0 ? sourceOnly : (matches as IndexedSymbol[] ?? matches.ToArray());
+        return SymbolResolutionPolicy.PreferSourceOverExternal(matches, query).ToArray();
     }
 
     public SymbolSearchResult ResolveCallable(string query)
@@ -321,7 +309,9 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
     public IReadOnlyList<IndexedEdge> Incoming(string symbolId, params EdgeKind[] kinds) =>
         FilterEdges(_byTarget[symbolId], kinds);
 
-    public IReadOnlyList<IndexedSymbol> Members(IndexedSymbol container, int maxResults = 8)
+    public IReadOnlyList<IndexedSymbol> Members(
+        IndexedSymbol container,
+        int maxResults = QueryLimits.DefaultMemberMaxResults)
     {
         if (_connection is not null)
             return QueryRelatedSymbols(
@@ -348,14 +338,14 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
             .Where(symbol => symbol.Kind is NodeKind.Method or NodeKind.Constructor or NodeKind.Property or NodeKind.Field or NodeKind.Event)
             .OrderBy(symbol => symbol.StartLine ?? int.MaxValue)
             .ThenBy(symbol => symbol.Name, StringComparer.Ordinal)
-            .Take(maxResults)
+            .Take(QueryLimits.NormalizeMaxResults(maxResults))
             .ToArray();
     }
 
     public IReadOnlyList<ImpactItem> Impact(IndexedSymbol root, int depth, int maxResults) =>
         Impact(root, depth, maxResults, "code");
 
-    public static bool IsValidImpactProfile(string profile) => profile is "code" or "app";
+    public static bool IsValidImpactProfile(string profile) => QueryValidation.IsValidImpactProfile(profile);
 
     private static HashSet<EdgeKind> ResolveImpactEdgeKinds(string profile) => profile switch
     {
@@ -385,7 +375,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
         var result = new List<ImpactItem>();
         var seen = new HashSet<string>(StringComparer.Ordinal) { root.Id };
         var frontier = new[] { root.Id };
-        for (var currentDepth = 1; currentDepth <= Math.Max(0, depth) && frontier.Length > 0; currentDepth++)
+        for (var currentDepth = 1; currentDepth <= QueryLimits.NormalizeImpactDepth(depth) && frontier.Length > 0; currentDepth++)
         {
             var next = new List<string>();
             foreach (var targetId in frontier)
@@ -398,7 +388,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
                         continue;
                     result.Add(new ImpactItem(source, edge, currentDepth, root.Id));
                     next.Add(source.Id);
-                    if (result.Count >= Math.Max(1, maxResults))
+                    if (result.Count >= QueryLimits.NormalizeMaxResults(maxResults))
                         return result;
                 }
             }
@@ -438,7 +428,10 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
                 LIMIT $maxResults
                 """,
                 symbol.Id,
-                maxResults);
+                maxResults)
+                .DistinctBy(relation => relation.Symbol.Id)
+                .Take(QueryLimits.NormalizeMaxResults(maxResults))
+                .ToArray();
 
         return _bySource[symbol.Id]
             .Where(edge => edge.Kind == EdgeKind.ImplementedBy)
@@ -453,7 +446,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
             .ThenBy(relation => relation.Symbol.QualifiedName, StringComparer.Ordinal)
             .ThenBy(relation => relation.Symbol.Signature ?? string.Empty, StringComparer.Ordinal)
             .ThenBy(relation => relation.Symbol.Id, StringComparer.Ordinal)
-            .Take(Math.Max(1, maxResults))
+            .Take(QueryLimits.NormalizeMaxResults(maxResults))
             .ToArray();
     }
 
@@ -481,7 +474,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
                         continue;
                     result.Add(relation);
                     next.Add(relation.Symbol.Id);
-                    if (result.Count >= Math.Max(1, maxResults))
+                    if (result.Count >= QueryLimits.NormalizeMaxResults(maxResults))
                         return result;
                 }
             }
@@ -508,7 +501,10 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
                 LIMIT $maxResults
                 """,
                 symbol.Id,
-                maxResults);
+                maxResults)
+                .DistinctBy(relation => relation.Symbol.Id)
+                .Take(QueryLimits.NormalizeMaxResults(maxResults))
+                .ToArray();
 
         return _byTarget[symbol.Id]
             .Where(edge => ReferenceKinds.Contains(edge.Kind))
@@ -520,7 +516,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
             .ThenBy(relation => relation.Symbol.QualifiedName, StringComparer.Ordinal)
             .ThenBy(relation => relation.Symbol.Signature ?? string.Empty, StringComparer.Ordinal)
             .ThenBy(relation => relation.Symbol.Id, StringComparer.Ordinal)
-            .Take(Math.Max(1, maxResults))
+            .Take(QueryLimits.NormalizeMaxResults(maxResults))
             .ToArray();
     }
 
@@ -542,7 +538,10 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
                 LIMIT $maxResults
                 """,
                 symbol.Id,
-                maxResults);
+                maxResults)
+                .DistinctBy(relation => relation.Symbol.Id)
+                .Take(QueryLimits.NormalizeMaxResults(maxResults))
+                .ToArray();
 
         return _byTarget[symbol.Id]
             .Where(edge => edge.Kind == EdgeKind.Calls)
@@ -553,7 +552,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
             .ThenBy(relation => relation.Symbol.QualifiedName, StringComparer.Ordinal)
             .ThenBy(relation => relation.Symbol.Signature ?? string.Empty, StringComparer.Ordinal)
             .ThenBy(relation => relation.Symbol.Id, StringComparer.Ordinal)
-            .Take(Math.Max(1, maxResults))
+            .Take(QueryLimits.NormalizeMaxResults(maxResults))
             .ToArray();
     }
 
@@ -569,13 +568,13 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
         EdgeKind.Calls, EdgeKind.UsesType
     ];
 
-    public const int FlowMinDepth = 1;
-    public const int FlowMaxDepth = 8;
-    public const int FlowDefaultDepth = 4;
+    public const int FlowMinDepth = QueryLimits.FlowMinDepth;
+    public const int FlowMaxDepth = QueryLimits.FlowMaxDepth;
+    public const int FlowDefaultDepth = QueryLimits.FlowDefaultDepth;
 
-    public static bool IsValidFlowKind(string kind) => kind is "http" or "ui" or "all";
+    public static bool IsValidFlowKind(string kind) => QueryValidation.IsValidFlowKind(kind);
 
-    public static bool IsValidFlowDepth(int depth) => depth is >= FlowMinDepth and <= FlowMaxDepth;
+    public static bool IsValidFlowDepth(int depth) => QueryValidation.IsValidFlowDepth(depth);
 
     private static HashSet<EdgeKind> ResolveFlowEdgeKinds(string kind) => kind switch
     {
@@ -595,7 +594,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
     public IReadOnlyList<ImpactItem> Flow(IndexedSymbol entry, string kind, int depth, int maxResults, double minConfidence)
     {
         var edgeKinds = ResolveFlowEdgeKinds(kind);
-        var clampedDepth = Math.Clamp(depth, FlowMinDepth, FlowMaxDepth);
+        var clampedDepth = QueryLimits.ClampFlowDepth(depth);
 
         if (_connection is not null)
             return QueryFlow(entry.Id, edgeKinds, clampedDepth, maxResults, minConfidence);
@@ -618,7 +617,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
                         continue;
                     result.Add(new ImpactItem(targetSymbol, edge, level, entry.Id));
                     next.Add(targetSymbol.Id);
-                    if (result.Count >= Math.Max(1, maxResults))
+                    if (result.Count >= QueryLimits.NormalizeMaxResults(maxResults))
                         return result;
                 }
             }
@@ -723,9 +722,9 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
             LIMIT $maxResults
             """;
         command.Parameters.AddWithValue("$rootId", rootId);
-        command.Parameters.AddWithValue("$maxDepth", Math.Max(1, maxDepth));
+        command.Parameters.AddWithValue("$maxDepth", QueryLimits.NormalizeTraversalDepth(maxDepth));
         command.Parameters.AddWithValue("$minConfidence", minConfidence);
-        command.Parameters.AddWithValue("$maxResults", Math.Max(1, maxResults));
+        command.Parameters.AddWithValue("$maxResults", QueryLimits.NormalizeMaxResults(maxResults));
         using var reader = command.ExecuteReader();
         var result = new List<ImpactItem>();
         while (reader.Read())
@@ -740,8 +739,8 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
         string sourceId,
         string targetId,
         EdgeKind? edgeKind = null,
-        int maxResults = 20,
-        double minConfidence = 0)
+        int maxResults = QueryLimits.DefaultMaxResults,
+        double minConfidence = QueryLimits.DefaultMinConfidence)
     {
         if (_connection is not null)
             return QueryRelations(sourceId, targetId, edgeKind, maxResults, minConfidence);
@@ -760,7 +759,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
                 continue;
             var (file, line) = ResolveEdgeLocation(edge, fileById);
             results.Add(new RelationQueryResult(source, target, edge, RelationEvidenceMapper.FromEdge(edge, source, target, file, line)));
-            if (results.Count >= Math.Max(1, maxResults))
+            if (results.Count >= QueryLimits.NormalizeMaxResults(maxResults))
                 break;
         }
         return results;
@@ -799,7 +798,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
         command.Parameters.AddWithValue("$targetId", targetId);
         command.Parameters.AddWithValue("$edgeKind", edgeKind?.ToString() ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$minConfidence", minConfidence);
-        command.Parameters.AddWithValue("$maxResults", Math.Max(1, maxResults));
+        command.Parameters.AddWithValue("$maxResults", QueryLimits.NormalizeMaxResults(maxResults));
         using var reader = command.ExecuteReader();
         var results = new List<RelationQueryResult>();
         while (reader.Read())
@@ -1157,7 +1156,7 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
     private static bool AddWithinBudget(List<string> lines, string line, int tokenBudget, ref int charsSoFar)
     {
         var additionLength = (lines.Count == 0 ? 0 : 1) + line.Length;
-        if (lines.Count > 0 && ApproximateTokens(charsSoFar) + ApproximateTokens(additionLength) > Math.Max(1, tokenBudget))
+        if (lines.Count > 0 && ApproximateTokens(charsSoFar) + ApproximateTokens(additionLength) > QueryLimits.NormalizeTokenBudget(tokenBudget))
             return false;
         lines.Add(line);
         charsSoFar += additionLength;

@@ -3,9 +3,11 @@ using System.Reflection;
 using System.Text;
 using CodeMap.CSharp;
 using CodeMap.Core;
+using CodeMap.Core.Contracts;
 using CodeMap.Core.Models;
 using Microsoft.Data.Sqlite;
 using CodeMap.Web;
+using CodeMap.Storage.Migrations;
 
 namespace CodeMap.Storage;
 
@@ -39,7 +41,7 @@ public sealed record IndexSummary(
 }
 
 
-public sealed class SqliteCodeMapStore
+public sealed class SqliteCodeMapStore : ICodeMapIndexWriter
 {
 
 
@@ -83,11 +85,26 @@ public sealed class SqliteCodeMapStore
 
     public string DatabasePath { get; }
 
+    public async Task CommitAsync(IndexCommitBatch batch, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(batch);
+        await ReplaceProjectsAsync(batch.Projects, batch.RemovedProjects, cancellationToken);
+        if (batch.Metadata.Count == 0)
+            return;
+
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        foreach (var item in batch.Metadata)
+            await SetMetadataAsync(connection, transaction, item.Key, item.Value, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
         await using var connection = await OpenAsync(cancellationToken);
         await ExecuteAsync(connection, null, Schema, cancellationToken);
+        await new CodeMapMigrator().EnsureAsync(connection, cancellationToken);
         await EnsureContainsSearchIndexPopulatedAsync(connection, cancellationToken);
     }
 
@@ -190,6 +207,10 @@ public sealed class SqliteCodeMapStore
         declaredIds.UnionWith(existingOwners.Keys);
 
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        // The state transition is committed together with the graph mutation.
+        // Readers therefore see the previous ready graph until the replacement
+        // is complete, and cancellation/rollback cannot expose partial data.
+        await SetMetadataAsync(connection, transaction, "index_state", "updating", cancellationToken);
         foreach (var projectName in removedProjects.Concat(projects.Select(p => p.ProjectName)).Distinct(StringComparer.Ordinal))
             await DeleteProjectAsync(connection, transaction, projectName, cancellationToken);
 

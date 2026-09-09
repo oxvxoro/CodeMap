@@ -30,6 +30,10 @@ internal static class FixtureIndex
 
     private static string FindFixtureDirectory()
     {
+        var configured = Environment.GetEnvironmentVariable("CODEMAP_BENCHMARK_FIXTURE");
+        if (!string.IsNullOrWhiteSpace(configured) && Directory.Exists(configured))
+            return Path.GetFullPath(configured);
+
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null)
         {

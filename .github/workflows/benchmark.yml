@@ -1,0 +1,47 @@
+name: Benchmark report
+
+on:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet restore CodeMap.slnx
+      - run: dotnet build CodeMap.slnx --no-restore -c Release -warnaserror
+      - name: Generate medium corpus
+        run: python3 benchmarks/generate_fixture.py "$RUNNER_TEMP/codemap-generated-medium" --projects 50 --symbols 50000
+      - name: Run Tier B benchmark report
+        env:
+          CODEMAP_BENCHMARK_FIXTURE: ${{ runner.temp }}/codemap-generated-medium
+        run: dotnet run -c Release --project benchmarks/CodeMap.Benchmarks --no-build -- --filter '*' --exporters json
+      - name: Run quota A/B report
+        run: python3 benchmarks/quota_ab.py
+      - name: Write benchmark summary
+        shell: bash
+        run: |
+          mkdir -p artifacts/benchmark
+          {
+            echo "# CodeMap benchmark summary"
+            echo
+            echo "- commit: $(git rev-parse HEAD)"
+            echo "- runner: $(uname -a)"
+            echo "- correctness is a hard gate; wall-clock changes are warnings"
+            echo
+            echo "## Artifacts"
+            find BenchmarkDotNet.Artifacts artifacts -type f \( -name '*.json' -o -name '*.md' \) -print 2>/dev/null | sort
+          } > artifacts/benchmark/summary.md
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codemap-benchmark-report
+          path: |
+            BenchmarkDotNet.Artifacts
+            artifacts

@@ -7,6 +7,7 @@
     <Project Path="src/CodeMap.Mcp/CodeMap.Mcp.csproj" />
     <Project Path="src/CodeMap.Storage/CodeMap.Storage.csproj" />
     <Project Path="src/CodeMap.Scip/CodeMap.Scip.csproj" />
+    <Project Path="src/CodeMap.Engine/CodeMap.Engine.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/CodeMap.Core.Tests/CodeMap.Core.Tests.csproj" />

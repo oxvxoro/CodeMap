@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\CodeMap.Core\CodeMap.Core.csproj" />
+    <ProjectReference Include="..\CodeMap.Storage\CodeMap.Storage.csproj" />
+    <ProjectReference Include="..\CodeMap.CSharp\CodeMap.CSharp.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

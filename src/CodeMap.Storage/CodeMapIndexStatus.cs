@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using CodeMap.Core.Models;
 
 namespace CodeMap.Storage;
 
@@ -11,7 +12,10 @@ public sealed record CodeMapIndexStatus(
     IReadOnlyDictionary<string, string> AnalyzerVersions,
     bool AnalyzerVersionsOutdated,
     int Symbols,
-    int Edges);
+    int Edges)
+{
+    public IndexLifecycleState LifecycleState => IndexLifecycleStateParser.Parse(IndexState);
+}
 
 public static class CodeMapIndexStatusReader
 {

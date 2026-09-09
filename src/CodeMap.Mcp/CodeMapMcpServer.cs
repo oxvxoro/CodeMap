@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using CodeMap.CSharp;
 using CodeMap.Core;
+using CodeMap.Engine.Application;
 using CodeMap.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -22,6 +23,10 @@ public static class CodeMapMcpServer
         builder.Logging.AddConsole(consoleLogOptions =>
             consoleLogOptions.LogToStandardErrorThreshold = LogLevel.Trace);
         builder.Services.AddSingleton(new CodeMapMcpContext(defaultRoot));
+        builder.Services.AddSingleton<IIndexFreshnessService>(services =>
+            services.GetRequiredService<CodeMapMcpContext>());
+        builder.Services.AddSingleton<CodeMapApplication>(services =>
+            new CodeMapApplication(services.GetRequiredService<IIndexFreshnessService>()));
         builder.Services
             .AddMcpServer()
             .WithStdioServerTransport()
@@ -46,7 +51,7 @@ public static class CodeMapMcpServer
 
 
 
-public sealed class CodeMapMcpContext(string defaultRoot) : IDisposable
+public sealed class CodeMapMcpContext(string defaultRoot) : IDisposable, IIndexFreshnessService
 {
     public string DefaultRoot { get; } = defaultRoot;
 
@@ -82,10 +87,11 @@ public sealed class CodeMapMcpContext(string defaultRoot) : IDisposable
 
     public async Task<bool> IsUpToDateAsync(string projectRoot, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var key = Path.GetFullPath(projectRoot);
         var entry = _freshness.GetOrAdd(key, _ => new FreshnessEntry());
 
-        int generation;
+        Task<bool> probeTask;
         lock (entry.Gate)
         {
             if (entry.UpToDate is { } cached)
@@ -96,30 +102,17 @@ public sealed class CodeMapMcpContext(string defaultRoot) : IDisposable
 
             // 해시 검사 중 발생한 변경도 놓치지 않도록 watcher를 먼저 시작한다.
             EnsureWatcher(key, entry);
-            generation = entry.Generation;
+            entry.InFlight ??= ProbeAndCacheAsync(key, entry);
+            probeTask = entry.InFlight;
         }
 
-        var upToDate = await FreshnessProbe(key, cancellationToken);
-
-        lock (entry.Gate)
-        {
-
-
-
-
-
-
-
-            if (entry.Generation != generation)
-                return false;
-            if (entry.Watcher is not null)
-                entry.UpToDate = upToDate;
-        }
-        return upToDate;
+        return await probeTask.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
 
     public void InvalidateRoot(string projectRoot) => Invalidate(Path.GetFullPath(projectRoot));
+
+    void IIndexFreshnessService.Invalidate(string projectRoot) => InvalidateRoot(projectRoot);
 
     private void Invalidate(string key)
     {
@@ -156,7 +149,16 @@ public sealed class CodeMapMcpContext(string defaultRoot) : IDisposable
                 else
                     OnEvent(null, e);
             };
-            watcher.Error += (_, _) => Invalidate(root);
+            watcher.Error += (_, _) =>
+            {
+                lock (entry.Gate)
+                {
+                    entry.UpToDate = null;
+                    entry.Generation++;
+                    entry.Watcher?.Dispose();
+                    entry.Watcher = null;
+                }
+            };
             watcher.EnableRaisingEvents = true;
             entry.Watcher = watcher;
         }
@@ -169,11 +171,34 @@ public sealed class CodeMapMcpContext(string defaultRoot) : IDisposable
         }
     }
 
+    private async Task<bool> ProbeAndCacheAsync(string root, FreshnessEntry entry)
+    {
+        int generation;
+        lock (entry.Gate)
+            generation = entry.Generation;
+        try
+        {
+            var upToDate = await FreshnessProbe(root, CancellationToken.None).ConfigureAwait(false);
+            lock (entry.Gate)
+            {
+                if (entry.Generation == generation && entry.Watcher is not null)
+                    entry.UpToDate = upToDate;
+                return entry.Generation == generation && upToDate;
+            }
+        }
+        finally
+        {
+            lock (entry.Gate)
+                entry.InFlight = null;
+        }
+    }
+
     private sealed class FreshnessEntry
     {
         public readonly object Gate = new();
         public bool? UpToDate;
         public int Generation;
+        public Task<bool>? InFlight;
         public FileSystemWatcher? Watcher;
     }
 }
@@ -182,13 +207,12 @@ public sealed class CodeMapMcpContext(string defaultRoot) : IDisposable
 public static class CodeMapTools
 {
     [McpServerTool, Description("Find symbols in the CodeMap semantic index.")]
-    public static async Task<string> FindSymbol(CodeMapMcpContext context, string query, string? root = null, int maxResults = 20, CancellationToken cancellationToken = default)
+    public static async Task<string> FindSymbol(CodeMapMcpContext context, CodeMapApplication application, string query, string? root = null, int maxResults = 20, CancellationToken cancellationToken = default)
     {
-        var loaded = await OpenServiceAsync(context, root, cancellationToken);
-        if (loaded.Error is not null)
-            return BuildingResponse(loaded.Error);
-        await using var service = loaded.Service!;
-        var matches = service.Find(query, maxResults);
+        var response = await application.FindAsync(new FindRequest(query, root, maxResults), cancellationToken);
+        if (!response.Succeeded)
+            return JsonSerializer.Serialize(new { error = ErrorObject(response.Error!), stale = response.Stale });
+        var matches = response.Value!.Matches;
         return JsonSerializer.Serialize(new
         {
             matches = matches.Select(symbol => new
@@ -203,28 +227,28 @@ public static class CodeMapTools
                 symbol.EndLine,
                 symbol.Language
             }),
-            stale = loaded.Stale
+            stale = response.Stale
         });
     }
 
     [McpServerTool, Description("Build an agent-friendly context bundle for a task.")]
-    public static async Task<string> GetContext(CodeMapMcpContext context, string task, string? root = null, int maxResults = 5, int tokens = 500, CancellationToken cancellationToken = default)
+    public static async Task<string> GetContext(CodeMapMcpContext context, CodeMapApplication application, string task, string? root = null, int maxResults = 5, int tokens = 500, CancellationToken cancellationToken = default)
     {
-
-
-
-        var loaded = await OpenServiceAsync(context, root, cancellationToken);
-        if (loaded.Error is not null)
-            return BuildingResponse(loaded.Error);
-        await using var service = loaded.Service!;
-        var matches = service.Find(task, maxResults);
-        var map = service.BuildMap(matches.FirstOrDefault()?.Name ?? task, null, tokens);
-        return JsonSerializer.Serialize(new { matches, mapLines = map.Lines, stale = loaded.Stale });
+        var response = await application.ContextAsync(new ContextRequest(task, root, maxResults, tokens), cancellationToken);
+        if (!response.Succeeded)
+            return JsonSerializer.Serialize(new { error = ErrorObject(response.Error!), stale = response.Stale });
+        return JsonSerializer.Serialize(new
+        {
+            matches = response.Value!.Matches,
+            mapLines = response.Value.Map.Lines,
+            stale = response.Stale
+        });
     }
 
     [McpServerTool, Description("Compute an intraprocedural C# semantic dependency slice for one executable symbol. Requires a fresh CodeMap index; use refresh_index first when the index is stale.")]
     public static async Task<string> GetSemanticSlice(
         CodeMapMcpContext context,
+        CodeMapApplication application,
         string query,
         string direction = "backward",
         int? line = null,
@@ -237,98 +261,63 @@ public static class CodeMapTools
         if (!Enum.TryParse<SliceDirection>(direction, ignoreCase: true, out var parsedDirection))
             return JsonSerializer.Serialize(new { error = new { code = "query_failed", message = "direction must be 'backward' or 'forward'." } });
 
-        await context.SemanticSliceGate.WaitAsync(cancellationToken);
-        try
+        var response = await application.SemanticSliceAsync(
+            ResolveRoot(context, root),
+            new SemanticSliceRequest(parsedDirection, line, column, maxResults, query, includeSource),
+            cancellationToken);
+        if (!response.Succeeded)
+            return JsonSerializer.Serialize(new { error = ErrorObject(response.Error!), stale = response.Stale });
+        var result = response.Value!;
+        return JsonSerializer.Serialize(new
         {
-            var indexRoot = ResolveIndexRoot(ResolveRoot(context, root));
-            var result = await new CodeMapSemanticSliceService().SliceAsync(indexRoot,
-                new SemanticSliceRequest(parsedDirection, line, column, maxResults, query, includeSource), cancellationToken);
-            return JsonSerializer.Serialize(new
-            {
-                version = 1,
-                query,
-                direction = parsedDirection.ToString().ToLowerInvariant(),
-                entrySymbol = result.EntrySymbol,
-                scope = result.Scope,
-                items = result.Items,
-                dependencies = result.Dependencies,
-                result.Truncated,
-                source = result.Source,
-                stale = false
-            });
-        }
-        catch (SemanticSliceException exception)
-        {
-            return JsonSerializer.Serialize(new { error = new { code = exception.Code, message = exception.Message }, stale = exception.Code == "semantic_slice_stale_index" });
-        }
-        catch (FileNotFoundException exception)
-        {
-            return JsonSerializer.Serialize(new { error = new { code = "index_not_found", message = exception.Message } });
-        }
-        finally
-        {
-            context.SemanticSliceGate.Release();
-        }
+            version = 1,
+            query,
+            direction = parsedDirection.ToString().ToLowerInvariant(),
+            entrySymbol = result.EntrySymbol,
+            scope = result.Scope,
+            items = result.Items,
+            dependencies = result.Dependencies,
+            result.Truncated,
+            source = result.Source,
+            stale = response.Stale
+        });
     }
 
     [McpServerTool, Description("Show reverse dependency impact for a symbol. profile 'code' (default) follows code references only; 'app' additionally reuses the routes/DI/UI edges flow already traverses.")]
-    public static async Task<string> GetImpact(CodeMapMcpContext context, string query, string? root = null, int depth = 2, int maxResults = 20, string profile = "code", CancellationToken cancellationToken = default)
+    public static async Task<string> GetImpact(CodeMapMcpContext context, CodeMapApplication application, string query, string? root = null, int depth = 2, int maxResults = 20, string profile = "code", CancellationToken cancellationToken = default)
     {
-        if (!CodeMapQueryService.IsValidImpactProfile(profile))
-            return JsonSerializer.Serialize(new { error = new { code = "query_failed", message = "profile must be one of: code, app." } });
-
-        var loaded = await OpenServiceAsync(context, root, cancellationToken);
-        if (loaded.Error is not null)
-            return BuildingResponse(loaded.Error);
-        await using var service = loaded.Service!;
-        var resolution = service.ResolveSymbol(query, callableOnly: false, maxResults);
-        if (resolution.Matches.Count == 0)
-            return JsonSerializer.Serialize(new { error = "no_matches", stale = loaded.Stale });
-        if (resolution.Matches.Count > 1)
-            return JsonSerializer.Serialize(new { error = "ambiguous", query, stale = loaded.Stale });
-        var symbol = resolution.Matches[0];
-        var impact = service.Impact(symbol, depth, maxResults, profile);
-        return JsonSerializer.Serialize(new { symbol, impact, stale = loaded.Stale });
+        var response = await application.ImpactAsync(
+            new ImpactRequest(query, root, depth, maxResults, profile), cancellationToken);
+        if (!response.Succeeded)
+            return JsonSerializer.Serialize(new { error = ErrorObject(response.Error!), query, stale = response.Stale });
+        return JsonSerializer.Serialize(new
+        {
+            symbol = response.Value!.Symbol,
+            impact = response.Value.Items,
+            stale = response.Stale
+        });
     }
 
     [McpServerTool, Description("Explain relations between two symbols with evidence metadata. Preferred follow-up after get_flow(includeEvidence=false) to prove the one selected edge, rather than requesting evidence for every relation up front.")]
-    public static async Task<string> ExplainRelation(CodeMapMcpContext context, string source, string target, string? root = null, double minConfidence = 0, int maxResults = 20, CancellationToken cancellationToken = default)
+    public static async Task<string> ExplainRelation(CodeMapMcpContext context, CodeMapApplication application, string source, string target, string? root = null, double minConfidence = 0, int maxResults = 20, CancellationToken cancellationToken = default)
     {
-        if (!RelationConfidence.IsValid(minConfidence))
+        var response = await application.RelationsAsync(
+            new RelationsRequest(source, target, root, null, maxResults, minConfidence), cancellationToken);
+        if (!response.Succeeded)
             return JsonSerializer.Serialize(new
             {
-                error = new
-                {
-                    code = "query_failed",
-                    message = RelationConfidence.InvalidMessage
-                }
+                error = ErrorObject(response.Error!),
+                query = ErrorQuery(response.Error!, source, target),
+                stale = response.Stale
             });
-
-        var loaded = await OpenServiceAsync(context, root, cancellationToken);
-        if (loaded.Error is not null)
-            return BuildingResponse(loaded.Error);
-        await using var service = loaded.Service!;
-        var sourceResolution = service.ResolveSymbol(source, callableOnly: false, maxResults);
-        if (sourceResolution.Matches.Count == 0)
-            return JsonSerializer.Serialize(new { error = "no_matches", stale = loaded.Stale });
-        if (sourceResolution.Matches.Count > 1)
-            return JsonSerializer.Serialize(new { error = "ambiguous", query = source, stale = loaded.Stale });
-        var sourceSymbol = sourceResolution.Matches[0];
-
-        var targetResolution = service.ResolveSymbol(target, callableOnly: false, maxResults);
-        if (targetResolution.Matches.Count == 0)
-            return JsonSerializer.Serialize(new { error = "no_matches", stale = loaded.Stale });
-        if (targetResolution.Matches.Count > 1)
-            return JsonSerializer.Serialize(new { error = "ambiguous", query = target, stale = loaded.Stale });
-        var targetSymbol = targetResolution.Matches[0];
-        var relations = service.Relations(sourceSymbol.Id, targetSymbol.Id, edgeKind: null, maxResults, minConfidence)
+        var relations = response.Value!
             .Select(item => new
             {
                 kind = "relation",
-                source = sourceSymbol.DisplayName,
-                target = targetSymbol.DisplayName,
-                sourceId = sourceSymbol.Id,
-                targetId = targetSymbol.Id,
+                source = item.Source.DisplayName,
+                target = item.Target.DisplayName,
+                sourceId = item.Source.Id,
+                targetId = item.Target.Id,
                 edgeKind = item.Edge.Kind.ToString(),
                 resolutionKind = item.Edge.ResolutionKind.ToString().ToLowerInvariant(),
                 confidence = item.Edge.Confidence,
@@ -337,7 +326,7 @@ public static class CodeMapTools
                     : new { file = item.Evidence.File, line = item.Evidence.Line },
                 evidence = item.Evidence.Evidence
             });
-        return JsonSerializer.Serialize(new { relations, stale = loaded.Stale });
+        return JsonSerializer.Serialize(new { relations, stale = response.Stale });
     }
 
     [McpServerTool, Description("Traverse HTTP/UI application flow edges (routes, DI, Razor/Blazor, WPF XAML) from an entry symbol or route. For first-pass discovery, prefer includeEvidence=false with the smallest useful depth/maxResults, then call explain_relation for the one edge that needs proof.")]
@@ -346,27 +335,16 @@ public static class CodeMapTools
 
 
 
-    public static async Task<string> GetFlow(CodeMapMcpContext context, string entry, string kind = "all", int depth = 4, string? root = null, int maxResults = 20, double minConfidence = 0, CancellationToken cancellationToken = default, bool includeEvidence = true)
+    public static async Task<string> GetFlow(CodeMapMcpContext context, CodeMapApplication application, string entry, string kind = "all", int depth = 4, string? root = null, int maxResults = 20, double minConfidence = 0, CancellationToken cancellationToken = default, bool includeEvidence = true)
     {
-        if (!RelationConfidence.IsValid(minConfidence))
-            return JsonSerializer.Serialize(new { error = new { code = "query_failed", message = RelationConfidence.InvalidMessage } });
-        if (!CodeMapQueryService.IsValidFlowKind(kind))
-            return JsonSerializer.Serialize(new { error = new { code = "query_failed", message = "kind must be one of: http, ui, all." } });
-        if (!CodeMapQueryService.IsValidFlowDepth(depth))
-            return JsonSerializer.Serialize(new { error = new { code = "query_failed", message = $"depth must be between {CodeMapQueryService.FlowMinDepth} and {CodeMapQueryService.FlowMaxDepth}." } });
-
-        var loaded = await OpenServiceAsync(context, root, cancellationToken);
-        if (loaded.Error is not null)
-            return BuildingResponse(loaded.Error);
-        await using var service = loaded.Service!;
-        var resolution = service.ResolveSymbol(entry, callableOnly: false, maxResults);
-        if (resolution.Matches.Count == 0)
-            return JsonSerializer.Serialize(new { error = "no_matches", stale = loaded.Stale });
-        if (resolution.Matches.Count > 1)
-            return JsonSerializer.Serialize(new { error = "ambiguous", query = entry, stale = loaded.Stale });
-        var entrySymbol = resolution.Matches[0];
-        var flow = service.Flow(entrySymbol, kind, depth, maxResults, minConfidence);
-        var sourceById = service.FindByIds(flow.Select(item => item.Via.SourceId));
+        var response = await application.FlowAsync(
+            new FlowRequest(entry, kind, depth, root, maxResults, minConfidence), cancellationToken);
+        if (!response.Succeeded)
+            return JsonSerializer.Serialize(new { error = ErrorObject(response.Error!), query = entry, stale = response.Stale });
+        var flowResult = response.Value!;
+        var entrySymbol = flowResult.Entry;
+        var flow = flowResult.Items;
+        var sourceById = flowResult.Sources;
 
 
 
@@ -376,12 +354,11 @@ public static class CodeMapTools
         object relations;
         if (includeEvidence)
         {
-            var fileById = service.FindFilesByIds(flow.Select(item => item.Via.SourceFileId).OfType<string>());
             relations = flow.Select(item =>
             {
                 var sourceSymbol = sourceById.GetValueOrDefault(item.Via.SourceId) ?? entrySymbol;
                 var evidenceValue = RelationEvidenceMapper.FromEdge(item.Via, sourceSymbol, item.Symbol,
-                    item.Via.SourceFileId is not null && fileById.TryGetValue(item.Via.SourceFileId, out var file) ? file.RelativePath : null,
+                    item.Via.SourceFileId is not null && flowResult.Files.TryGetValue(item.Via.SourceFileId, out var file) ? file.RelativePath : null,
                     item.Via.Line);
                 return new
                 {
@@ -438,12 +415,12 @@ public static class CodeMapTools
                 }
             },
             relations,
-            stale = loaded.Stale
+            stale = response.Stale
         });
     }
 
     [McpServerTool, Description("Refresh the CodeMap index for the repository.")]
-    public static async Task<string> RefreshIndex(CodeMapMcpContext context, string? root = null, bool force = false, CancellationToken cancellationToken = default)
+    public static async Task<string> RefreshIndex(CodeMapMcpContext context, CodeMapApplication application, string? root = null, bool force = false, CancellationToken cancellationToken = default)
     {
         var requestedRoot = ResolveRoot(context, root);
 
@@ -461,31 +438,26 @@ public static class CodeMapTools
         {
             actualRoot = requestedRoot;
         }
-        var summary = force
-            ? await new IncrementalCodeMapIndexer().IndexAsync(actualRoot, force: true, cancellationToken)
-            : await new IncrementalCodeMapIndexer().UpdateAsync(actualRoot, cancellationToken);
-
-
-
-
-        context.InvalidateRoot(ResolveIndexRoot(actualRoot));
-        return summary.ToString();
+        var response = await application.RefreshIndexAsync(new RefreshIndexRequest(actualRoot, force), cancellationToken);
+        return response.Succeeded
+            ? response.Value!.ToString()
+            : JsonSerializer.Serialize(new { error = ErrorObject(response.Error!) });
     }
 
     [McpServerTool, Description("Read CodeMap index metadata and counts without modifying the index.")]
     public static async Task<string> GetStatus(
         CodeMapMcpContext context,
+        CodeMapApplication application,
         string? root = null,
         bool checkFreshness = false,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            var databasePath = CodeMapIndexLocator.FindDatabase(ResolveRoot(context, root));
-            var status = await CodeMapIndexStatusReader.ReadAsync(databasePath, cancellationToken);
-            bool? stale = checkFreshness
-                ? await CodeMapIndexLocator.IsStaleAsync(databasePath, cancellationToken, context.IsUpToDateAsync)
-                : null;
+            var response = await application.StatusAsync(new StatusRequest(ResolveRoot(context, root), checkFreshness), cancellationToken);
+            if (!response.Succeeded)
+                return JsonSerializer.Serialize(new { version = 1, error = ErrorObject(response.Error!) });
+            var status = response.Value!;
             return JsonSerializer.Serialize(new
             {
                 version = 1,
@@ -498,7 +470,7 @@ public static class CodeMapTools
                 symbols = status.Symbols,
                 edges = status.Edges,
                 freshnessChecked = checkFreshness,
-                stale
+                stale = checkFreshness ? response.Stale : (bool?)null
             });
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -508,6 +480,64 @@ public static class CodeMapTools
         }
     }
 
+    // Source-compatible overloads for callers that invoke the tool methods
+    // directly. MCP discovery uses the attributed overloads above and injects
+    // the long-lived application instance from the host container.
+    public static async Task<string> FindSymbol(CodeMapMcpContext context, string query, string? root = null, int maxResults = 20, CancellationToken cancellationToken = default)
+    {
+        var response = await FindSymbol(context, new CodeMapApplication(context), query, root, maxResults, cancellationToken);
+        using var document = JsonDocument.Parse(response);
+        if (document.RootElement.TryGetProperty("error", out var error)
+            && error.ValueKind == JsonValueKind.Object
+            && error.TryGetProperty("code", out var code)
+            && code.GetString() == "schema_outdated")
+            throw new InvalidOperationException(error.GetProperty("message").GetString());
+        return response;
+    }
+
+    public static Task<string> GetContext(CodeMapMcpContext context, string task, string? root = null, int maxResults = 5, int tokens = 500, CancellationToken cancellationToken = default) =>
+        GetContext(context, new CodeMapApplication(context), task, root, maxResults, tokens, cancellationToken);
+
+    public static Task<string> GetSemanticSlice(CodeMapMcpContext context, string query, string direction = "backward", int? line = null, int? column = null, int maxResults = 80, bool includeSource = false, string? root = null, CancellationToken cancellationToken = default) =>
+        GetSemanticSlice(context, new CodeMapApplication(context), query, direction, line, column, maxResults, includeSource, root, cancellationToken);
+
+    public static Task<string> GetImpact(CodeMapMcpContext context, string query, string? root = null, int depth = 2, int maxResults = 20, string profile = "code", CancellationToken cancellationToken = default) =>
+        LegacyErrorResponse(GetImpact(context, new CodeMapApplication(context), query, root, depth, maxResults, profile, cancellationToken));
+
+    public static Task<string> ExplainRelation(CodeMapMcpContext context, string source, string target, string? root = null, double minConfidence = 0, int maxResults = 20, CancellationToken cancellationToken = default) =>
+        LegacyErrorResponse(ExplainRelation(context, new CodeMapApplication(context), source, target, root, minConfidence, maxResults, cancellationToken));
+
+    public static Task<string> GetFlow(CodeMapMcpContext context, string entry, string kind = "all", int depth = 4, string? root = null, int maxResults = 20, double minConfidence = 0, CancellationToken cancellationToken = default, bool includeEvidence = true) =>
+        LegacyErrorResponse(GetFlow(context, new CodeMapApplication(context), entry, kind, depth, root, maxResults, minConfidence, cancellationToken, includeEvidence));
+
+    public static Task<string> RefreshIndex(CodeMapMcpContext context, string? root = null, bool force = false, CancellationToken cancellationToken = default) =>
+        RefreshIndex(context, new CodeMapApplication(context), root, force, cancellationToken);
+
+    public static Task<string> GetStatus(CodeMapMcpContext context, string? root = null, bool checkFreshness = false, CancellationToken cancellationToken = default) =>
+        GetStatus(context, new CodeMapApplication(context), root, checkFreshness, cancellationToken);
+
+    private static async Task<string> LegacyErrorResponse(Task<string> responseTask)
+    {
+        var response = await responseTask;
+        using var document = JsonDocument.Parse(response);
+        if (!document.RootElement.TryGetProperty("error", out var error)
+            || error.ValueKind != JsonValueKind.Object
+            || !(error.TryGetProperty("code", out var code) || error.TryGetProperty("Code", out code)))
+            return response;
+        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var property in document.RootElement.EnumerateObject())
+            values[property.Name] = property.NameEquals("error") ? code.GetString() : property.Value;
+        return JsonSerializer.Serialize(values);
+    }
+
+    private static object ErrorObject(QueryError error) =>
+        new { code = error.Code, message = error.Message };
+
+    private static string ErrorQuery(QueryError error, string first, string second) =>
+        error.Message.StartsWith("Symbol query '", StringComparison.Ordinal)
+            ? error.Message[14..].Split('\'', 2)[0]
+            : error.Message.Contains(second, StringComparison.Ordinal) ? second : first;
+
     private static string ResolveRoot(CodeMapMcpContext context, string? root) =>
         string.IsNullOrWhiteSpace(root) ? context.DefaultRoot : Path.GetFullPath(root);
 
@@ -516,53 +546,6 @@ public static class CodeMapTools
     {
         var databasePath = CodeMapIndexLocator.FindDatabase(queryRoot);
         return CodeMapIndexLocator.ResolveIndexRoot(databasePath);
-    }
-
-    private sealed record OpenServiceResult(CodeMapQueryService? Service, bool Stale, IndexBuildingException? Error = null);
-
-    private static string BuildingResponse(IndexBuildingException exception) =>
-        JsonSerializer.Serialize(new { error = new { code = "index_building", message = exception.Message }, stale = true });
-
-    private static async Task<OpenServiceResult> OpenServiceAsync(CodeMapMcpContext context, string? root, CancellationToken cancellationToken)
-    {
-        var databasePath = CodeMapIndexLocator.FindDatabase(ResolveRoot(context, root));
-        var store = new CodeMapQueryStore(databasePath);
-        var connectionTask = store.OpenReadOnlyConnectionAsync(cancellationToken);
-        var staleTask = CodeMapIndexLocator.IsStaleAsync(databasePath, cancellationToken, context.IsUpToDateAsync);
-        try
-        {
-            var connection = await connectionTask;
-            try
-            {
-                var stale = await staleTask;
-                return new OpenServiceResult(new CodeMapQueryService(connection), stale);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                await connection.DisposeAsync();
-                throw;
-            }
-            catch
-            {
-                await connection.DisposeAsync();
-                throw;
-            }
-        }
-        catch (IndexBuildingException exception)
-        {
-            try
-            {
-                await staleTask;
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch
-            {
-            }
-            return new OpenServiceResult(null, Stale: true, exception);
-        }
     }
 
 }

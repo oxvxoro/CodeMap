@@ -6,6 +6,7 @@ using CodeMap.Core;
 using CodeMap.Core.Analysis;
 using CodeMap.Core.Ids;
 using CodeMap.Core.Models;
+using CodeMap.CSharp.Analysis;
 using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -239,8 +240,7 @@ public sealed class CSharpLanguageAnalyzer : ILanguageAnalyzer
         return new AnalysisResult { Nodes = nodes, Edges = edges };
     }
 
-    private static string EdgeKey(CodeEdge edge) =>
-        $"{edge.SourceId}{edge.TargetId}{edge.Kind}{edge.SourceLocation?.StartLine}{edge.SourceLocation?.StartColumn}{edge.SourceLocation?.EndLine}{edge.SourceLocation?.EndColumn}";
+    private static string EdgeKey(CodeEdge edge) => EdgeIdentity.From(edge).ToString();
 
     internal static ImmutableArray<MetadataReference> CreateDefaultReferences()
     {
@@ -1007,7 +1007,8 @@ public sealed class CSharpLanguageAnalyzer : ILanguageAnalyzer
     private static void AddEdge(string sourceId, string targetId, EdgeKind kind, SourceLocation? location,
         string? targetProject, List<CodeEdge> edges, HashSet<string> keys)
     {
-        var key = $"{sourceId}\u001f{targetId}\u001f{kind}\u001f{location?.StartLine}\u001f{location?.StartColumn}\u001f{location?.EndLine}\u001f{location?.EndColumn}";
+        var key = new EdgeIdentity(sourceId, targetId, kind,
+            location?.StartLine, location?.StartColumn, location?.EndLine, location?.EndColumn).ToString();
         if (sourceId == targetId || !keys.Add(key))
             return;
         edges.Add(new CodeEdge

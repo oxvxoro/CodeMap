@@ -1,4 +1,5 @@
 using CodeMap.Core.Models;
+using CodeMap.Storage.Queries;
 using Microsoft.Data.Sqlite;
 
 namespace CodeMap.Storage;
@@ -24,7 +25,7 @@ public sealed partial class CodeMapQueryService
     private IReadOnlyList<IndexedSymbol> QuerySymbolsInFiles(HashSet<string> relativePaths, int maxResults)
     {
         var symbols = new Dictionary<string, IndexedSymbol>(StringComparer.Ordinal);
-        foreach (var chunk in relativePaths.Chunk(SqliteVariableChunkSize))
+        foreach (var chunk in SqliteBatch.ChunkForVariables(relativePaths, variablesPerItem: 1, fixedVariables: 1))
         {
             using var command = _connection!.CreateCommand();
             var names = new List<string>();
@@ -46,7 +47,7 @@ public sealed partial class CodeMapQueryService
                 ORDER BY s.qualified_name, s.id
                 LIMIT $maxResults
                 """;
-            command.Parameters.AddWithValue("$maxResults", Math.Max(1, maxResults));
+            command.Parameters.AddWithValue("$maxResults", QueryLimits.NormalizeMaxResults(maxResults));
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
@@ -57,7 +58,7 @@ public sealed partial class CodeMapQueryService
         return symbols.Values
             .OrderBy(symbol => symbol.QualifiedName, StringComparer.Ordinal)
             .ThenBy(symbol => symbol.Id, StringComparer.Ordinal)
-            .Take(Math.Max(1, maxResults))
+            .Take(QueryLimits.NormalizeMaxResults(maxResults))
             .ToArray();
     }
 
@@ -199,27 +200,8 @@ public sealed partial class CodeMapQueryService
         return symbols;
     }
 
-    private static IReadOnlyList<IndexedSymbol> RankFindResults(IReadOnlyList<IndexedSymbol> candidates, string query, int maxResults)
-    {
-        var ranked = candidates
-            .Select(symbol => (Symbol: symbol, Score: FindScore(symbol, query)))
-            .Where(item => item.Score >= 0)
-            .GroupBy(item => item.Score / 100)
-            .OrderByDescending(group => group.Key)
-            .FirstOrDefault()?
-            .ToArray() ?? Array.Empty<(IndexedSymbol Symbol, int Score)>();
-        return ranked
-            .OrderByDescending(item => item.Score)
-
-
-            .ThenBy(item => SqliteCodeMapStore.IsExternalProject(item.Symbol.Project))
-            .ThenBy(item => item.Symbol.QualifiedName, StringComparer.Ordinal)
-            .ThenBy(item => item.Symbol.Signature ?? string.Empty, StringComparer.Ordinal)
-            .ThenBy(item => item.Symbol.Id, StringComparer.Ordinal)
-            .Take(Math.Max(1, maxResults))
-            .Select(item => item.Symbol)
-            .ToArray();
-    }
+    private static IReadOnlyList<IndexedSymbol> RankFindResults(IReadOnlyList<IndexedSymbol> candidates, string query, int maxResults) =>
+        QueryRanking.Rank(candidates, query, maxResults);
 
     private IReadOnlyList<IndexedSymbol> QueryExactSymbols(string query, bool callableOnly)
     {
@@ -269,7 +251,7 @@ public sealed partial class CodeMapQueryService
     private IReadOnlyDictionary<string, IndexedSymbol> QuerySymbolsByIds(IReadOnlyList<string> ids)
     {
         var symbols = new Dictionary<string, IndexedSymbol>(StringComparer.Ordinal);
-        foreach (var chunk in ids.Chunk(SqliteVariableChunkSize))
+        foreach (var chunk in SqliteBatch.ChunkForVariables(ids, variablesPerItem: 1, fixedVariables: 0))
         {
             using var command = _connection!.CreateCommand();
             var names = new List<string>();
@@ -305,7 +287,7 @@ public sealed partial class CodeMapQueryService
     private IReadOnlyDictionary<string, IndexedFile> QueryFilesByIds(IReadOnlyList<string> ids)
     {
         var result = new Dictionary<string, IndexedFile>(StringComparer.Ordinal);
-        foreach (var chunk in ids.Chunk(SqliteVariableChunkSize))
+        foreach (var chunk in SqliteBatch.ChunkForVariables(ids, variablesPerItem: 1, fixedVariables: 0))
         {
             using var command = _connection!.CreateCommand();
             var names = new List<string>();
@@ -337,7 +319,7 @@ public sealed partial class CodeMapQueryService
         using var command = _connection!.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("$symbolId", symbolId);
-        command.Parameters.AddWithValue("$maxResults", Math.Max(1, maxResults));
+        command.Parameters.AddWithValue("$maxResults", QueryLimits.NormalizeMaxResults(maxResults));
         using var reader = command.ExecuteReader();
         var symbols = new List<IndexedSymbol>();
         while (reader.Read())
@@ -350,7 +332,10 @@ public sealed partial class CodeMapQueryService
         using var command = _connection!.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("$symbolId", symbolId);
-        command.Parameters.AddWithValue("$maxResults", Math.Max(1, maxResults));
+        // Relation callers deduplicate by symbol after reading edge rows, just
+        // like the snapshot path. Use an effectively unbounded SQL limit so a
+        // duplicate edge cannot consume the public result limit first.
+        command.Parameters.AddWithValue("$maxResults", int.MaxValue);
         using var reader = command.ExecuteReader();
         var relations = new List<IndexedRelation>();
         while (reader.Read())
@@ -404,8 +389,8 @@ public sealed partial class CodeMapQueryService
             LIMIT $maxResults
             """;
         command.Parameters.AddWithValue("$rootId", rootId);
-        command.Parameters.AddWithValue("$maxDepth", Math.Max(1, maxDepth));
-        command.Parameters.AddWithValue("$maxResults", Math.Max(1, maxResults));
+        command.Parameters.AddWithValue("$maxDepth", QueryLimits.NormalizeTraversalDepth(maxDepth));
+        command.Parameters.AddWithValue("$maxResults", QueryLimits.NormalizeMaxResults(maxResults));
         using var reader = command.ExecuteReader();
         var relations = new List<IndexedRelation>();
         while (reader.Read())
@@ -478,8 +463,8 @@ public sealed partial class CodeMapQueryService
             LIMIT $maxResults
             """;
         command.Parameters.AddWithValue("$rootId", rootId);
-        command.Parameters.AddWithValue("$maxDepth", Math.Max(0, maxDepth));
-        command.Parameters.AddWithValue("$maxResults", Math.Max(1, maxResults));
+        command.Parameters.AddWithValue("$maxDepth", QueryLimits.NormalizeImpactDepth(maxDepth));
+        command.Parameters.AddWithValue("$maxResults", QueryLimits.NormalizeMaxResults(maxResults));
         using var reader = command.ExecuteReader();
         var result = new List<ImpactItem>();
         while (reader.Read())
@@ -572,8 +557,8 @@ public sealed partial class CodeMapQueryService
             WHERE r.per_root_rank <= $maxResultsPerRoot
             ORDER BY r.root_order, r.depth, s.qualified_name, s.id
             """;
-        command.Parameters.AddWithValue("$maxDepth", Math.Max(0, maxDepth));
-        command.Parameters.AddWithValue("$maxResultsPerRoot", Math.Max(1, maxResultsPerRoot));
+        command.Parameters.AddWithValue("$maxDepth", QueryLimits.NormalizeImpactDepth(maxDepth));
+        command.Parameters.AddWithValue("$maxResultsPerRoot", QueryLimits.NormalizeMaxResults(maxResultsPerRoot));
         using var reader = command.ExecuteReader();
         var result = new List<ImpactItem>();
         while (reader.Read())
@@ -736,7 +721,7 @@ public sealed partial class CodeMapQueryService
         if (symbolIds.Count == 0)
             return new Dictionary<string, IReadOnlyList<IndexedSymbol>>(StringComparer.Ordinal);
 
-        foreach (var chunk in symbolIds.Chunk(SqliteVariableChunkSize))
+        foreach (var chunk in SqliteBatch.ChunkForVariables(symbolIds, variablesPerItem: 1, fixedVariables: 0))
         {
             using var command = _connection!.CreateCommand();
             var names = new List<string>();

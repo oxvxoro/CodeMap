@@ -104,6 +104,5 @@ public static class RelationConfidence
 {
     public const string InvalidMessage = "min-confidence must be a finite number between 0 and 1.";
 
-    public static bool IsValid(double value) =>
-        double.IsFinite(value) && value is >= 0 and <= 1;
+    public static bool IsValid(double value) => Queries.QueryValidation.IsValidConfidence(value);
 }

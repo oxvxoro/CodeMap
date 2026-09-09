@@ -1,0 +1,11 @@
+{
+  "name": "self-repo",
+  "formatVersion": 1,
+  "status": "placeholder",
+  "source": "scheduled BenchmarkDotNet run",
+  "commit": null,
+  "runtime": null,
+  "os": null,
+  "cpu": null,
+  "cases": []
+}
