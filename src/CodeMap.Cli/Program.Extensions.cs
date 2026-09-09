@@ -1,6 +1,7 @@
 using System.CommandLine;
 using System.Text.Json;
 using CodeMap.Core;
+using CodeMap.Core.Models;
 using CodeMap.Engine.Application;
 using CodeMap.Mcp;
 using CodeMap.Storage;
@@ -584,7 +585,7 @@ public static partial class Program
 
 
         using var freshnessCache = new CodeMapMcpContext(defaultRoot);
-        var application = new CodeMapApplication(freshnessCache);
+        var application = new CodeMapApplication(freshnessCache, graphReaderFactory: OpenGraphReaderAsync);
         Console.Error.WriteLine("CodeMap LSP bridge ready. Send one JSON object per line.");
         while (!ShutdownToken.IsCancellationRequested)
         {

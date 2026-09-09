@@ -158,6 +158,6 @@ public sealed class EngineContractTests
         Assert.Single(result.AnalyzedProjects);
         Assert.NotNull(committed);
         Assert.Single(committed!.Projects);
-        Assert.Equal("A", committed.Projects[0].ProjectName);
+        Assert.Contains(committed.Projects, project => project.ProjectName == "A");
     }
 }

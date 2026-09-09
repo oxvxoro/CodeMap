@@ -1,4 +1,5 @@
 using CodeMap.Storage;
+using CodeMap.Core.Contracts;
 using CodeMap.Core.Models;
 using CodeMap.CSharp;
 using CodeMap.Engine.Concurrency;
@@ -13,14 +14,19 @@ public sealed class CodeMapApplication
 {
     private readonly IIndexFreshnessService? _freshness;
     private readonly Func<IncrementalCodeMapIndexer> _indexerFactory;
+    private readonly Func<string, CancellationToken, Task<ICodeMapGraphReader>> _graphReaderFactory;
     private readonly KeyedAsyncLock<string> _sliceLocks = new();
 
     public CodeMapApplication(
         IIndexFreshnessService? freshness = null,
-        Func<IncrementalCodeMapIndexer>? indexerFactory = null)
+        Func<IncrementalCodeMapIndexer>? indexerFactory = null,
+        Func<string, CancellationToken, Task<ICodeMapGraphReader>>? graphReaderFactory = null)
     {
         _freshness = freshness;
         _indexerFactory = indexerFactory ?? (() => new IncrementalCodeMapIndexer());
+        _graphReaderFactory = graphReaderFactory
+            ?? throw new ArgumentNullException(nameof(graphReaderFactory),
+                "A graph reader factory must be supplied by the storage adapter.");
     }
 
     public async Task<ApplicationResponse<ApplicationFindResult>> FindAsync(
@@ -91,7 +97,7 @@ public sealed class CodeMapApplication
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (!CodeMapQueryService.IsValidImpactProfile(request.Profile))
+        if (!CodeMapQueryValidation.IsValidImpactProfile(request.Profile))
             return ApplicationResponse<ApplicationImpactResult>.Failure(
                 new("query_failed", "profile must be one of: code, app."));
         if (!RelationConfidence.IsValid(request.MinConfidence))
@@ -117,12 +123,12 @@ public sealed class CodeMapApplication
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (!CodeMapQueryService.IsValidFlowKind(request.Kind))
+        if (!CodeMapQueryValidation.IsValidFlowKind(request.Kind))
             return ApplicationResponse<ApplicationFlowResult>.Failure(
                 new("query_failed", "kind must be one of: http, ui, all."));
-        if (!CodeMapQueryService.IsValidFlowDepth(request.Depth))
+        if (!CodeMapQueryValidation.IsValidFlowDepth(request.Depth))
             return ApplicationResponse<ApplicationFlowResult>.Failure(
-                new("query_failed", $"depth must be between {CodeMapQueryService.FlowMinDepth} and {CodeMapQueryService.FlowMaxDepth}."));
+                new("query_failed", $"depth must be between 1 and 8."));
         if (!RelationConfidence.IsValid(request.MinConfidence))
             return ApplicationResponse<ApplicationFlowResult>.Failure(
                 new("query_failed", RelationConfidence.InvalidMessage));
@@ -203,7 +209,7 @@ public sealed class CodeMapApplication
     private async Task<ApplicationResponse<T>> WithServiceAsync<T>(
         string? requestedRoot,
         CancellationToken cancellationToken,
-        Func<CodeMapQueryService, bool, ApplicationResponse<T>> action)
+        Func<ICodeMapGraphReader, bool, ApplicationResponse<T>> action)
     {
         try
         {
@@ -216,9 +222,8 @@ public sealed class CodeMapApplication
                     database,
                     cancellationToken,
                     _freshness.IsUpToDateAsync);
-            await using var connection = await new CodeMapQueryStore(database).OpenReadOnlyConnectionAsync(cancellationToken);
-            await using var service = new CodeMapQueryService(connection);
-            return action(service, stale);
+            await using var reader = await _graphReaderFactory(database, cancellationToken);
+            return action(reader, stale);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -226,7 +231,7 @@ public sealed class CodeMapApplication
         }
     }
 
-    private static IndexedSymbol? ResolveUnique(CodeMapQueryService service, string query, int maxResults, out QueryError? error)
+    private static IndexedSymbol? ResolveUnique(ICodeMapGraphReader service, string query, int maxResults, out QueryError? error)
     {
         var resolution = service.ResolveSymbol(query, callableOnly: false, maxResults);
         if (resolution.Matches.Count == 0)

@@ -1,13 +1,11 @@
 using CodeMap.Core.Models;
+using CodeMap.Core.Contracts;
 using CodeMap.Storage.Queries;
 using Microsoft.Data.Sqlite;
 
 namespace CodeMap.Storage;
 
-public sealed record SymbolSearchResult(IReadOnlyList<IndexedSymbol> Matches, bool IsAmbiguous = false);
-
-
-public sealed partial class CodeMapQueryService : IAsyncDisposable
+public sealed partial class CodeMapQueryService : ICodeMapGraphReader
 {
     private static readonly HashSet<EdgeKind> ReferenceKinds =
     [EdgeKind.References, EdgeKind.Calls, EdgeKind.Constructs, EdgeKind.UsesType, EdgeKind.Implements, EdgeKind.Inherits];
@@ -1166,11 +1164,4 @@ public sealed partial class CodeMapQueryService : IAsyncDisposable
     private static int ApproximateTokens(string text) => ApproximateTokens(text.Length);
 
     private static int ApproximateTokens(int length) => (int)Math.Ceiling(length / 4d);
-}
-
-public sealed record ImpactItem(IndexedSymbol Symbol, IndexedEdge Via, int Depth, string? RootId = null);
-
-public sealed record RepoMap(IReadOnlyList<string> Lines, int TokenBudget, int EstimatedTokens)
-{
-    public string Text => string.Join(Environment.NewLine, Lines);
 }

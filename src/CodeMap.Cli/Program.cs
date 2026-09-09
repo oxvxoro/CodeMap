@@ -4,9 +4,11 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeMap.CSharp;
 using CodeMap.Core.Models;
+using CodeMap.Core.Contracts;
 using CodeMap.Engine.Application;
 using CodeMap.Mcp;
 using CodeMap.Storage;
+using CodeMap.Storage.Queries;
 using CodeMap.Cli.Presentation;
 
 namespace CodeMap.Cli;
@@ -20,7 +22,18 @@ public static partial class Program
     private const int DefaultDepth = 1;
     private const int DefaultMapTokens = 500;
     private static CancellationToken ShutdownToken { get; set; }
-    private static CodeMapApplication Application { get; } = new(new UncachedIndexFreshnessService());
+    private static CodeMapApplication Application { get; } = new(
+        new UncachedIndexFreshnessService(),
+        graphReaderFactory: OpenGraphReaderAsync);
+
+    private static async Task<ICodeMapGraphReader> OpenGraphReaderAsync(
+        string databasePath,
+        CancellationToken cancellationToken)
+    {
+        var connection = await new CodeMapQueryStore(databasePath)
+            .OpenReadOnlyConnectionAsync(cancellationToken);
+        return new SqliteCodeMapGraphReader(connection);
+    }
 
     public static Task<int> Main(string[] args) => CliHost.RunAsync(args);
 

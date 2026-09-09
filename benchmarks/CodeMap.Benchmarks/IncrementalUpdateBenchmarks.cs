@@ -1,4 +1,5 @@
 using BenchmarkDotNet.Attributes;
+using CodeMap.Core.Models;
 using CodeMap.Storage;
 
 namespace CodeMap.Benchmarks;

@@ -3,8 +3,10 @@ using System.ComponentModel;
 using System.Text.Json;
 using CodeMap.CSharp;
 using CodeMap.Core;
+using CodeMap.Core.Contracts;
 using CodeMap.Engine.Application;
 using CodeMap.Storage;
+using CodeMap.Storage.Queries;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -26,12 +28,24 @@ public static class CodeMapMcpServer
         builder.Services.AddSingleton<IIndexFreshnessService>(services =>
             services.GetRequiredService<CodeMapMcpContext>());
         builder.Services.AddSingleton<CodeMapApplication>(services =>
-            new CodeMapApplication(services.GetRequiredService<IIndexFreshnessService>()));
+            CreateApplication(services.GetRequiredService<IIndexFreshnessService>()));
         builder.Services
             .AddMcpServer()
             .WithStdioServerTransport()
             .WithToolsFromAssembly();
         await builder.Build().RunAsync(cancellationToken);
+    }
+
+    internal static CodeMapApplication CreateApplication(IIndexFreshnessService freshness) =>
+        new(freshness, graphReaderFactory: OpenGraphReaderAsync);
+
+    private static async Task<ICodeMapGraphReader> OpenGraphReaderAsync(
+        string databasePath,
+        CancellationToken cancellationToken)
+    {
+        var connection = await new CodeMapQueryStore(databasePath)
+            .OpenReadOnlyConnectionAsync(cancellationToken);
+        return new SqliteCodeMapGraphReader(connection);
     }
 }
 
@@ -485,7 +499,7 @@ public static class CodeMapTools
     // the long-lived application instance from the host container.
     public static async Task<string> FindSymbol(CodeMapMcpContext context, string query, string? root = null, int maxResults = 20, CancellationToken cancellationToken = default)
     {
-        var response = await FindSymbol(context, new CodeMapApplication(context), query, root, maxResults, cancellationToken);
+        var response = await FindSymbol(context, CodeMapMcpServer.CreateApplication(context), query, root, maxResults, cancellationToken);
         using var document = JsonDocument.Parse(response);
         if (document.RootElement.TryGetProperty("error", out var error)
             && error.ValueKind == JsonValueKind.Object
@@ -496,25 +510,25 @@ public static class CodeMapTools
     }
 
     public static Task<string> GetContext(CodeMapMcpContext context, string task, string? root = null, int maxResults = 5, int tokens = 500, CancellationToken cancellationToken = default) =>
-        GetContext(context, new CodeMapApplication(context), task, root, maxResults, tokens, cancellationToken);
+        GetContext(context, CodeMapMcpServer.CreateApplication(context), task, root, maxResults, tokens, cancellationToken);
 
     public static Task<string> GetSemanticSlice(CodeMapMcpContext context, string query, string direction = "backward", int? line = null, int? column = null, int maxResults = 80, bool includeSource = false, string? root = null, CancellationToken cancellationToken = default) =>
-        GetSemanticSlice(context, new CodeMapApplication(context), query, direction, line, column, maxResults, includeSource, root, cancellationToken);
+        GetSemanticSlice(context, CodeMapMcpServer.CreateApplication(context), query, direction, line, column, maxResults, includeSource, root, cancellationToken);
 
     public static Task<string> GetImpact(CodeMapMcpContext context, string query, string? root = null, int depth = 2, int maxResults = 20, string profile = "code", CancellationToken cancellationToken = default) =>
-        LegacyErrorResponse(GetImpact(context, new CodeMapApplication(context), query, root, depth, maxResults, profile, cancellationToken));
+        LegacyErrorResponse(GetImpact(context, CodeMapMcpServer.CreateApplication(context), query, root, depth, maxResults, profile, cancellationToken));
 
     public static Task<string> ExplainRelation(CodeMapMcpContext context, string source, string target, string? root = null, double minConfidence = 0, int maxResults = 20, CancellationToken cancellationToken = default) =>
-        LegacyErrorResponse(ExplainRelation(context, new CodeMapApplication(context), source, target, root, minConfidence, maxResults, cancellationToken));
+        LegacyErrorResponse(ExplainRelation(context, CodeMapMcpServer.CreateApplication(context), source, target, root, minConfidence, maxResults, cancellationToken));
 
     public static Task<string> GetFlow(CodeMapMcpContext context, string entry, string kind = "all", int depth = 4, string? root = null, int maxResults = 20, double minConfidence = 0, CancellationToken cancellationToken = default, bool includeEvidence = true) =>
-        LegacyErrorResponse(GetFlow(context, new CodeMapApplication(context), entry, kind, depth, root, maxResults, minConfidence, cancellationToken, includeEvidence));
+        LegacyErrorResponse(GetFlow(context, CodeMapMcpServer.CreateApplication(context), entry, kind, depth, root, maxResults, minConfidence, cancellationToken, includeEvidence));
 
     public static Task<string> RefreshIndex(CodeMapMcpContext context, string? root = null, bool force = false, CancellationToken cancellationToken = default) =>
-        RefreshIndex(context, new CodeMapApplication(context), root, force, cancellationToken);
+        RefreshIndex(context, CodeMapMcpServer.CreateApplication(context), root, force, cancellationToken);
 
     public static Task<string> GetStatus(CodeMapMcpContext context, string? root = null, bool checkFreshness = false, CancellationToken cancellationToken = default) =>
-        GetStatus(context, new CodeMapApplication(context), root, checkFreshness, cancellationToken);
+        GetStatus(context, CodeMapMcpServer.CreateApplication(context), root, checkFreshness, cancellationToken);
 
     private static async Task<string> LegacyErrorResponse(Task<string> responseTask)
     {

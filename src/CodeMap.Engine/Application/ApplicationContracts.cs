@@ -1,4 +1,4 @@
-using CodeMap.Storage;
+using CodeMap.Core.Models;
 
 namespace CodeMap.Engine.Application;
 
