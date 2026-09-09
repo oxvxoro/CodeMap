@@ -309,6 +309,11 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
 
     public IReadOnlyList<IndexedSymbol> Members(
         IndexedSymbol container,
+        int maxResults = QueryLimits.DefaultMemberMaxResults) =>
+        MembersPaged(container, maxResults, 0).Items;
+
+    private IReadOnlyList<IndexedSymbol> MembersCore(
+        IndexedSymbol container,
         int maxResults = QueryLimits.DefaultMemberMaxResults)
     {
         if (_connection is not null)
@@ -340,8 +345,15 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
             .ToArray();
     }
 
+    public RelationPage<IndexedSymbol> MembersPaged(IndexedSymbol symbol, int limit, int offset)
+    {
+        var normalizedLimit = QueryLimits.NormalizeMaxResults(limit);
+        var all = MembersCore(symbol, PageFetchLimit(normalizedLimit, offset));
+        return Page(all, normalizedLimit, offset);
+    }
+
     public IReadOnlyList<ImpactItem> Impact(IndexedSymbol root, int depth, int maxResults) =>
-        Impact(root, depth, maxResults, "code");
+        ImpactPaged(root, depth, maxResults, 0, "code").Items;
 
     public static bool IsValidImpactProfile(string profile) => QueryValidation.IsValidImpactProfile(profile);
 
@@ -359,7 +371,10 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
 
 
 
-    public IReadOnlyList<ImpactItem> Impact(IndexedSymbol root, int depth, int maxResults, string profile)
+    public IReadOnlyList<ImpactItem> Impact(IndexedSymbol root, int depth, int maxResults, string profile) =>
+        ImpactPaged(root, depth, maxResults, 0, profile).Items;
+
+    private IReadOnlyList<ImpactItem> ImpactCore(IndexedSymbol root, int depth, int maxResults, string profile)
     {
         var edgeKinds = ResolveImpactEdgeKinds(profile);
         if (_connection is not null)
@@ -398,7 +413,7 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
     public IReadOnlyList<IndexedSymbol> Implementations(IndexedSymbol symbol, int maxResults) =>
         ImplementationRelations(symbol, maxResults).Select(relation => relation.Symbol).DistinctBy(symbol => symbol.Id).ToArray();
 
-    public IReadOnlyList<IndexedRelation> ImplementationRelations(IndexedSymbol symbol, int maxResults)
+    private IReadOnlyList<IndexedRelation> ImplementationRelationsCore(IndexedSymbol symbol, int maxResults, double minConfidence = 0)
     {
         if (_connection is not null)
             return QueryEdgeRelations(
@@ -408,34 +423,51 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
                        source_id, target_id, edge_kind, source_file_id, line, resolution_kind, confidence,
                        start_column, end_line_via, end_column
                 FROM (
-                SELECT s.id, s.file_id, f.project, f.relative_path, s.kind, s.name,
-                       s.qualified_name, s.signature, s.start_line, s.end_line, s.visibility, s.language,
-                       e.source_id, e.target_id, e.kind AS edge_kind, e.source_file_id, e.line, e.resolution_kind, e.confidence,
-                       e.start_column, e.end_line AS end_line_via, e.end_column
-                FROM edges e JOIN symbols s ON s.id = e.target_id JOIN files f ON f.id = s.file_id
-                WHERE e.source_id = $symbolId AND e.kind = 'ImplementedBy'
-                UNION ALL
-                SELECT s.id, s.file_id, f.project, f.relative_path, s.kind, s.name,
-                       s.qualified_name, s.signature, s.start_line, s.end_line, s.visibility, s.language,
-                       e.source_id, e.target_id, e.kind AS edge_kind, e.source_file_id, e.line, e.resolution_kind, e.confidence,
-                       e.start_column, e.end_line AS end_line_via, e.end_column
-                FROM edges e JOIN symbols s ON s.id = e.source_id JOIN files f ON f.id = s.file_id
-                WHERE e.target_id = $symbolId AND e.kind = 'Implements'
+                    SELECT relations.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY relations.id
+                                ORDER BY CASE relations.edge_kind
+                                             WHEN 'ImplementedBy' THEN 0
+                                             WHEN 'Implements' THEN 1
+                                             ELSE 2
+                                         END,
+                                         relations.project, relations.qualified_name,
+                                        COALESCE(relations.signature, ''), relations.id,
+                                        relations.edge_kind, relations.source_id, relations.target_id) AS row_number
+                    FROM (
+                        SELECT s.id, s.file_id, f.project, f.relative_path, s.kind, s.name,
+                               s.qualified_name, s.signature, s.start_line, s.end_line, s.visibility, s.language,
+                               e.source_id, e.target_id, e.kind AS edge_kind, e.source_file_id, e.line, e.resolution_kind, e.confidence,
+                               e.start_column, e.end_line AS end_line_via, e.end_column
+                        FROM edges e JOIN symbols s ON s.id = e.target_id JOIN files f ON f.id = s.file_id
+                         WHERE e.source_id = $symbolId AND e.kind = 'ImplementedBy'
+                           AND (e.confidence IS NULL OR e.confidence >= $minConfidence)
+                        UNION ALL
+                        SELECT s.id, s.file_id, f.project, f.relative_path, s.kind, s.name,
+                               s.qualified_name, s.signature, s.start_line, s.end_line, s.visibility, s.language,
+                               e.source_id, e.target_id, e.kind AS edge_kind, e.source_file_id, e.line, e.resolution_kind, e.confidence,
+                               e.start_column, e.end_line AS end_line_via, e.end_column
+                        FROM edges e JOIN symbols s ON s.id = e.source_id JOIN files f ON f.id = s.file_id
+                         WHERE e.target_id = $symbolId AND e.kind = 'Implements'
+                           AND (e.confidence IS NULL OR e.confidence >= $minConfidence)
+                    ) relations
                 )
+                WHERE row_number = 1
                 ORDER BY project, qualified_name, COALESCE(signature, ''), id
                 LIMIT $maxResults
                 """,
                 symbol.Id,
-                maxResults)
+                maxResults,
+                minConfidence)
                 .DistinctBy(relation => relation.Symbol.Id)
                 .Take(QueryLimits.NormalizeMaxResults(maxResults))
                 .ToArray();
 
         return _bySource[symbol.Id]
-            .Where(edge => edge.Kind == EdgeKind.ImplementedBy)
+            .Where(edge => edge.Kind == EdgeKind.ImplementedBy && EffectiveConfidence(edge) >= minConfidence)
             .Select(edge => TryRelation(edge.TargetId, edge))
             .Concat(_byTarget[symbol.Id]
-                .Where(edge => edge.Kind == EdgeKind.Implements)
+                .Where(edge => edge.Kind == EdgeKind.Implements && EffectiveConfidence(edge) >= minConfidence)
                 .Select(edge => TryRelation(edge.SourceId, edge)))
             .Where(relation => relation is not null)
             .Select(relation => relation!)
@@ -448,13 +480,24 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
             .ToArray();
     }
 
+    public IReadOnlyList<IndexedRelation> ImplementationRelations(IndexedSymbol symbol, int maxResults) =>
+        ImplementationRelationsPaged(symbol, maxResults, 0).Items;
+
+    public RelationPage<IndexedRelation> ImplementationRelationsPaged(
+        IndexedSymbol symbol, int limit, int offset, double minConfidence = 0)
+    {
+        var normalizedLimit = QueryLimits.NormalizeMaxResults(limit);
+        var all = ImplementationRelationsCore(symbol, PageFetchLimit(normalizedLimit, offset), minConfidence).ToArray();
+        return Page(all, normalizedLimit, offset);
+    }
+
     public IReadOnlyList<IndexedSymbol> Callees(IndexedSymbol root, int depth, int maxResults) =>
         CalleeRelations(root, depth, maxResults).Select(relation => relation.Symbol).ToArray();
 
-    public IReadOnlyList<IndexedRelation> CalleeRelations(IndexedSymbol root, int depth, int maxResults)
+    private IReadOnlyList<IndexedRelation> CalleeRelationsCore(IndexedSymbol root, int depth, int maxResults, double minConfidence = 0)
     {
         if (_connection is not null)
-            return QueryCalleeRelations(root.Id, depth, maxResults);
+            return QueryCalleeRelations(root.Id, depth, maxResults, minConfidence);
 
         var result = new List<IndexedRelation>();
         var seen = new HashSet<string>(StringComparer.Ordinal) { root.Id };
@@ -465,6 +508,7 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
             foreach (var sourceId in frontier)
             {
                 foreach (var edge in Outgoing(sourceId, EdgeKind.Calls)
+                    .Where(edge => EffectiveConfidence(edge) >= minConfidence)
                     .OrderBy(edge => edge.TargetId, StringComparer.Ordinal))
                 {
                     var relation = TryRelation(edge.TargetId, edge);
@@ -481,6 +525,17 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
         return result;
     }
 
+    public IReadOnlyList<IndexedRelation> CalleeRelations(IndexedSymbol root, int depth, int maxResults) =>
+        CalleeRelationsPaged(root, depth, maxResults, 0).Items;
+
+    public RelationPage<IndexedRelation> CalleeRelationsPaged(
+        IndexedSymbol root, int depth, int limit, int offset, double minConfidence = 0)
+    {
+        var normalizedLimit = QueryLimits.NormalizeMaxResults(limit);
+        var all = CalleeRelationsCore(root, depth, PageFetchLimit(normalizedLimit, offset), minConfidence).ToArray();
+        return Page(all, normalizedLimit, offset);
+    }
+
     public IReadOnlyList<IndexedSymbol> ReferencedBy(IndexedSymbol symbol, int maxResults) =>
         ReferencedByRelations(symbol, maxResults).Select(relation => relation.Symbol).DistinctBy(symbol => symbol.Id).ToArray();
 
@@ -489,13 +544,24 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
         if (_connection is not null)
             return QueryEdgeRelations(
                 """
-                SELECT s.id, s.file_id, f.project, f.relative_path, s.kind, s.name,
-                       s.qualified_name, s.signature, s.start_line, s.end_line, s.visibility, s.language,
-                       e.source_id, e.target_id, e.kind, e.source_file_id, e.line, e.resolution_kind, e.confidence,
-                       e.start_column, e.end_line, e.end_column
-                FROM edges e JOIN symbols s ON s.id = e.source_id JOIN files f ON f.id = s.file_id
-                WHERE e.target_id = $symbolId AND e.kind IN ('References', 'Calls', 'Constructs', 'UsesType', 'Implements', 'Inherits')
-                ORDER BY f.project, s.qualified_name, COALESCE(s.signature, ''), s.id, e.kind
+                SELECT id, file_id, project, relative_path, kind, name,
+                       qualified_name, signature, start_line, end_line, visibility, language,
+                       source_id, target_id, edge_kind, source_file_id, line, resolution_kind, confidence,
+                       start_column, end_line_via, end_column
+                FROM (
+                    SELECT s.id, s.file_id, f.project, f.relative_path, s.kind, s.name,
+                           s.qualified_name, s.signature, s.start_line, s.end_line, s.visibility, s.language,
+                           e.source_id, e.target_id, e.kind AS edge_kind, e.source_file_id, e.line, e.resolution_kind, e.confidence,
+                           e.start_column, e.end_line AS end_line_via, e.end_column,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY s.id
+                               ORDER BY f.project, s.qualified_name, COALESCE(s.signature, ''), s.id,
+                                        e.kind, e.source_id, e.target_id, e.line) AS row_number
+                    FROM edges e JOIN symbols s ON s.id = e.source_id JOIN files f ON f.id = s.file_id
+                    WHERE e.target_id = $symbolId AND e.kind IN ('References', 'Calls', 'Constructs', 'UsesType', 'Implements', 'Inherits')
+                )
+                WHERE row_number = 1
+                ORDER BY project, qualified_name, COALESCE(signature, ''), id
                 LIMIT $maxResults
                 """,
                 symbol.Id,
@@ -521,28 +587,41 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
     public IReadOnlyList<IndexedSymbol> Callers(IndexedSymbol symbol, int maxResults) =>
         CallerRelations(symbol, maxResults).Select(relation => relation.Symbol).ToArray();
 
-    public IReadOnlyList<IndexedRelation> CallerRelations(IndexedSymbol symbol, int maxResults)
+    private IReadOnlyList<IndexedRelation> CallerRelationsCore(IndexedSymbol symbol, int maxResults, double minConfidence = 0)
     {
         if (_connection is not null)
             return QueryEdgeRelations(
                 """
-                SELECT s.id, s.file_id, f.project, f.relative_path, s.kind, s.name,
-                       s.qualified_name, s.signature, s.start_line, s.end_line, s.visibility, s.language,
-                       e.source_id, e.target_id, e.kind, e.source_file_id, e.line, e.resolution_kind, e.confidence,
-                       e.start_column, e.end_line, e.end_column
-                FROM edges e JOIN symbols s ON s.id = e.source_id JOIN files f ON f.id = s.file_id
-                WHERE e.target_id = $symbolId AND e.kind = 'Calls'
-                ORDER BY f.project, s.qualified_name, COALESCE(s.signature, ''), s.id
+                SELECT id, file_id, project, relative_path, kind, name,
+                       qualified_name, signature, start_line, end_line, visibility, language,
+                       source_id, target_id, edge_kind, source_file_id, line, resolution_kind, confidence,
+                       start_column, end_line_via, end_column
+                FROM (
+                    SELECT s.id, s.file_id, f.project, f.relative_path, s.kind, s.name,
+                           s.qualified_name, s.signature, s.start_line, s.end_line, s.visibility, s.language,
+                           e.source_id, e.target_id, e.kind AS edge_kind, e.source_file_id, e.line, e.resolution_kind, e.confidence,
+                           e.start_column, e.end_line AS end_line_via, e.end_column,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY s.id
+                               ORDER BY f.project, s.qualified_name, COALESCE(s.signature, ''), s.id,
+                                        e.line, e.source_id, e.target_id) AS row_number
+                    FROM edges e JOIN symbols s ON s.id = e.source_id JOIN files f ON f.id = s.file_id
+                     WHERE e.target_id = $symbolId AND e.kind = 'Calls'
+                       AND (e.confidence IS NULL OR e.confidence >= $minConfidence)
+                )
+                WHERE row_number = 1
+                ORDER BY project, qualified_name, COALESCE(signature, ''), id
                 LIMIT $maxResults
                 """,
                 symbol.Id,
-                maxResults)
+                maxResults,
+                minConfidence)
                 .DistinctBy(relation => relation.Symbol.Id)
                 .Take(QueryLimits.NormalizeMaxResults(maxResults))
                 .ToArray();
 
         return _byTarget[symbol.Id]
-            .Where(edge => edge.Kind == EdgeKind.Calls)
+            .Where(edge => edge.Kind == EdgeKind.Calls && EffectiveConfidence(edge) >= minConfidence)
             .Select(edge => TryRelation(edge.SourceId, edge))
             .Where(relation => relation is not null)
             .Select(relation => relation!)
@@ -552,6 +631,17 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
             .ThenBy(relation => relation.Symbol.Id, StringComparer.Ordinal)
             .Take(QueryLimits.NormalizeMaxResults(maxResults))
             .ToArray();
+    }
+
+    public IReadOnlyList<IndexedRelation> CallerRelations(IndexedSymbol symbol, int maxResults) =>
+        CallerRelationsPaged(symbol, maxResults, 0).Items;
+
+    public RelationPage<IndexedRelation> CallerRelationsPaged(
+        IndexedSymbol symbol, int limit, int offset, double minConfidence = 0)
+    {
+        var normalizedLimit = QueryLimits.NormalizeMaxResults(limit);
+        var all = CallerRelationsCore(symbol, PageFetchLimit(normalizedLimit, offset), minConfidence).ToArray();
+        return Page(all, normalizedLimit, offset);
     }
 
     private static readonly HashSet<EdgeKind> FlowHttpKinds =
@@ -589,7 +679,10 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
 
 
 
-    public IReadOnlyList<ImpactItem> Flow(IndexedSymbol entry, string kind, int depth, int maxResults, double minConfidence)
+    public IReadOnlyList<ImpactItem> Flow(IndexedSymbol entry, string kind, int depth, int maxResults, double minConfidence) =>
+        FlowPaged(entry, kind, depth, maxResults, 0, minConfidence).Items;
+
+    private IReadOnlyList<ImpactItem> FlowCore(IndexedSymbol entry, string kind, int depth, int maxResults, double minConfidence)
     {
         var edgeKinds = ResolveFlowEdgeKinds(kind);
         var clampedDepth = QueryLimits.ClampFlowDepth(depth);
@@ -622,6 +715,22 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
             frontier = next.Distinct(StringComparer.Ordinal).ToArray();
         }
         return result;
+    }
+
+    public RelationPage<ImpactItem> FlowPaged(
+        IndexedSymbol entry, string kind, int depth, int limit, int offset, double minConfidence)
+    {
+        var normalizedLimit = QueryLimits.NormalizeMaxResults(limit);
+        var all = FlowCore(entry, kind, depth, PageFetchLimit(normalizedLimit, offset), minConfidence);
+        return Page(all, normalizedLimit, offset);
+    }
+
+    public RelationPage<ImpactItem> ImpactPaged(
+        IndexedSymbol root, int depth, int limit, int offset, string profile)
+    {
+        var normalizedLimit = QueryLimits.NormalizeMaxResults(limit);
+        var all = ImpactCore(root, depth, PageFetchLimit(normalizedLimit, offset), profile);
+        return Page(all, normalizedLimit, offset);
     }
 
     private static double EffectiveConfidence(IndexedEdge edge) => edge.Confidence ?? 1.0;
@@ -1143,6 +1252,22 @@ public sealed partial class CodeMapQueryService : ICodeMapGraphReader
     {
         var kindSet = kinds.Length == 0 ? null : kinds.ToHashSet();
         return edges.Where(edge => kindSet is null || kindSet.Contains(edge.Kind)).ToArray();
+    }
+
+    private static int PageFetchLimit(int limit, int offset)
+    {
+        var requested = (long)Math.Max(0, offset) + limit + 1L;
+        return requested >= int.MaxValue ? int.MaxValue : (int)requested;
+    }
+
+    private static RelationPage<T> Page<T>(IReadOnlyList<T> values, int limit, int offset)
+    {
+        var pageLimit = limit == int.MaxValue ? int.MaxValue : limit + 1;
+        var page = values
+            .Skip(Math.Max(0, offset))
+            .Take(pageLimit)
+            .ToArray();
+        return new RelationPage<T>(page.Take(limit).ToArray(), page.Length > limit);
     }
 
 

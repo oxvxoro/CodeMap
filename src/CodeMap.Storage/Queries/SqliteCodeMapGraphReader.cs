@@ -25,6 +25,12 @@ public sealed class SqliteCodeMapGraphReader : ICodeMapGraphReader
     public IReadOnlyList<IndexedRelation> CallerRelations(IndexedSymbol symbol, int maxResults = 200) => _service.CallerRelations(symbol, maxResults);
     public IReadOnlyList<IndexedRelation> CalleeRelations(IndexedSymbol symbol, int depth = 1, int maxResults = 200) => _service.CalleeRelations(symbol, depth, maxResults);
     public IReadOnlyList<IndexedRelation> ImplementationRelations(IndexedSymbol symbol, int maxResults = 200) => _service.ImplementationRelations(symbol, maxResults);
+    public RelationPage<IndexedRelation> CallerRelationsPaged(IndexedSymbol symbol, int limit, int offset, double minConfidence = 0) => _service.CallerRelationsPaged(symbol, limit, offset, minConfidence);
+    public RelationPage<IndexedRelation> CalleeRelationsPaged(IndexedSymbol symbol, int depth, int limit, int offset, double minConfidence = 0) => _service.CalleeRelationsPaged(symbol, depth, limit, offset, minConfidence);
+    public RelationPage<IndexedRelation> ImplementationRelationsPaged(IndexedSymbol symbol, int limit, int offset, double minConfidence = 0) => _service.ImplementationRelationsPaged(symbol, limit, offset, minConfidence);
+    public RelationPage<ImpactItem> ImpactPaged(IndexedSymbol root, int depth, int limit, int offset, string profile) => _service.ImpactPaged(root, depth, limit, offset, profile);
+    public RelationPage<ImpactItem> FlowPaged(IndexedSymbol entry, string kind, int depth, int limit, int offset, double minConfidence) => _service.FlowPaged(entry, kind, depth, limit, offset, minConfidence);
+    public RelationPage<IndexedSymbol> MembersPaged(IndexedSymbol symbol, int limit, int offset) => _service.MembersPaged(symbol, limit, offset);
     public IReadOnlyList<RelationQueryResult> Relations(string sourceId, string targetId, EdgeKind? edgeKind, int maxResults, double minConfidence) => _service.Relations(sourceId, targetId, edgeKind, maxResults, minConfidence);
     public IReadOnlyList<ImpactItem> Impact(IndexedSymbol root, int depth, int maxResults, string profile) => _service.Impact(root, depth, maxResults, profile);
     public IReadOnlyList<ImpactItem> Flow(IndexedSymbol entry, string kind, int depth, int maxResults, double minConfidence) => _service.Flow(entry, kind, depth, maxResults, minConfidence);

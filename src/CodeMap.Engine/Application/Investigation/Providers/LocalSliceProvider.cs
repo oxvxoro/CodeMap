@@ -1,8 +1,6 @@
 using CodeMap.Core.Contracts;
 using CodeMap.Core.Models.Investigation;
 using CodeMap.Core.Models;
-using CodeMap.Engine.Application;
-using CodeMap.CSharp;
 using CodeMap.Storage;
 
 namespace CodeMap.Engine.Application.Investigation.Providers;
@@ -13,7 +11,7 @@ internal sealed class LocalSliceProvider(
     public InvestigationProviderKind Kind => InvestigationProviderKind.LocalSlice;
 
     public async Task<InvestigationProviderResult> CollectAsync(ICodeMapGraphReader reader, IndexedSymbol root,
-        InvestigationOverrides overrides, CancellationToken cancellationToken)
+        InvestigationOverrides overrides, CancellationToken cancellationToken, int offset = 0, int? window = null)
     {
         if (!string.Equals(root.Language, "csharp", StringComparison.OrdinalIgnoreCase))
             return new([], ProviderCoverageStatus.Unsupported(Kind, "unsupported_language"));
@@ -23,6 +21,7 @@ internal sealed class LocalSliceProvider(
         try
         {
             var result = await slice(root, overrides.ProjectRoot, cancellationToken);
+            var normalizedOffset = Math.Max(0, offset);
             var candidates = result.Items
                 .Select(item => new LocalSliceEvidence(
                     result.Scope.SymbolId,
@@ -36,10 +35,14 @@ internal sealed class LocalSliceProvider(
                         .Where(dependency => dependency.Source == item.Id || dependency.Target == item.Id)
                         .ToArray()))
                 .Select(evidence => InvestigationCandidate.FromLocalSlice(root, evidence))
-                .Take(overrides.MaxResults)
+                .Skip(normalizedOffset)
+                .Take(Math.Min(overrides.MaxResults, Math.Max(1, window ?? overrides.MaxResults)))
                 .ToArray();
+            var hasMore = result.Items.Count > normalizedOffset + candidates.Length;
             var status = result.Truncated
                 ? ProviderCoverageStatus.Partial(Kind, "max_results", candidates.Length)
+                : hasMore
+                    ? ProviderCoverageStatus.Partial(Kind, "window", candidates.Length)
                 : ProviderCoverageStatus.Complete(Kind, candidates.Length);
             return new(candidates, status);
         }

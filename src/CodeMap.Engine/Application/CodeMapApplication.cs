@@ -219,13 +219,22 @@ public sealed class CodeMapApplication
                 request);
             var sourceMode = Enum.Parse<SourceEvidenceMode>(request.SourceMode, ignoreCase: true);
             var sourceSpans = new SourceEvidenceBuilder().BuildSpans(
-                locatedResult.Candidates,
+                locatedSelection.Selected,
                 sourceMode,
                 Math.Max(0, request.TokenBudget - locatedResult.Selection.EstimatedTokens),
                 new FileTextAccessor(indexRoot));
+            var sourceTokens = sourceSpans.Sum(span => Math.Max(1, (int)Math.Ceiling(span.Text.Length / 4d)));
+            var finalSelection = locatedSelection with
+            {
+                Cost = locatedSelection.Cost with
+                {
+                    Source = sourceTokens,
+                    TotalEstimated = locatedSelection.Cost.Structural + sourceTokens
+                }
+            };
             var response = new InvestigationResponse(1, request.Query, request.Goal, root, false, Array.Empty<IndexedSymbol>());
             return ApplicationResponse<InvestigationResult>.Success(
-                new InvestigationResult(response, locatedResult.Candidates, locatedResult.Selection, coverage, sourceSpans), stale);
+                new InvestigationResult(response, locatedResult.Candidates, finalSelection, coverage, sourceSpans), stale);
         });
 
         async Task<SemanticSliceResult> SliceForInvestigationAsync(

@@ -1,5 +1,14 @@
 namespace CodeMap.Engine.Application.Investigation;
 
+public sealed record InvestigationCostReport(
+    int Requested,
+    int Envelope,
+    int Structural,
+    int Source,
+    int TotalEstimated,
+    bool Truncated,
+    string? TruncationReason);
+
 public sealed record InvestigationSelection(
     IReadOnlyList<InvestigationCandidate> Selected,
     IReadOnlyList<InvestigationCandidate> Excluded,
@@ -8,6 +17,7 @@ public sealed record InvestigationSelection(
     string? TruncationReason)
 {
     public int RequestedBudget { get; init; }
+    public InvestigationCostReport Cost { get; init; } = new(0, 0, 0, 0, 0, false, null);
 }
 
 public sealed class InvestigationBudgetAllocator
@@ -46,7 +56,15 @@ public sealed class InvestigationBudgetAllocator
                 : "budget";
         return new InvestigationSelection(selected, excluded, estimated, excluded.Count > 0, reason)
         {
-            RequestedBudget = requestedBudget
+            RequestedBudget = requestedBudget,
+            Cost = new InvestigationCostReport(
+                requestedBudget,
+                Envelope: 0,
+                Structural: estimated,
+                Source: 0,
+                TotalEstimated: estimated,
+                Truncated: excluded.Count > 0,
+                TruncationReason: reason)
         };
     }
 }

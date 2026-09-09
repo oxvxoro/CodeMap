@@ -273,114 +273,30 @@ public static class CodeMapTools
         int maxResults = 200,
         int? depth = null,
         double minConfidence = 0,
+        bool includeHeuristic = true,
         string sourceMode = "minimal",
         CancellationToken cancellationToken = default)
     {
         if (!Enum.TryParse<InvestigationGoal>(goal, true, out var parsedGoal))
-            return JsonSerializer.Serialize(new { version = 1, query, goal, error = new { code = "query_failed", message = "goal must be one of: debug, trace, impact, understand." }, reason = "query_failed" });
+            return InvestigationPresentationMapper.Serialize(
+                new InvestigationErrorResponseDto(1, query, goal,
+                    new InvestigationErrorDto("query_failed", "goal must be one of: debug, trace, impact, understand."),
+                    "query_failed", false));
         var response = await application.InvestigateAsync(
-            new InvestigationRequest(query, parsedGoal, ResolveRoot(context, root), tokens, maxResults, depth, minConfidence, true, sourceMode),
+            new InvestigationRequest(query, parsedGoal, ResolveRoot(context, root), tokens, maxResults, depth, minConfidence, includeHeuristic, sourceMode),
             cancellationToken);
         if (!response.Succeeded)
         {
             if (response.Error!.Code == "ambiguous" && response.Value is { } ambiguous)
-                return JsonSerializer.Serialize(new
-                {
-                    version = 1,
-                    query,
-                    goal = parsedGoal.ToString().ToLowerInvariant(),
-                    root = (object?)null,
-                    isAmbiguous = true,
-                    ambiguousCandidates = ambiguous.Resolution.AmbiguousCandidates.Select(ToMatch).ToArray(),
-                    items = Array.Empty<object>(),
-                    sourceSpans = Array.Empty<object>(),
-                    budget = new { requested = ambiguous.Budget.RequestedBudget, estimated = 0, truncated = false, reason = (string?)null },
-                    coverage = new { providers = Array.Empty<object>(), remaining = new Dictionary<string, int>(), negativeEvidence = Array.Empty<string>() },
-                    stale = response.Stale,
-                    warnings = Array.Empty<string>(),
-                    reason = "ambiguous"
-                });
-            return JsonSerializer.Serialize(new { version = 1, query, goal = parsedGoal.ToString().ToLowerInvariant(), error = ErrorObject(response.Error!), reason = response.Error!.Code, stale = response.Stale });
+                return InvestigationPresentationMapper.Serialize(
+                    InvestigationPresentationMapper.ToAmbiguousResponse(query, parsedGoal, ambiguous, response.Stale));
+            return InvestigationPresentationMapper.Serialize(
+                InvestigationPresentationMapper.ToError(query, parsedGoal.ToString().ToLowerInvariant(), response.Error, response.Stale));
         }
         var result = response.Value!;
-        return JsonSerializer.Serialize(new
-        {
-            version = 1,
-            query,
-            goal = parsedGoal.ToString().ToLowerInvariant(),
-            root = result.Resolution.Root is null ? null : ToMatch(result.Resolution.Root),
-            isAmbiguous = result.Resolution.IsAmbiguous,
-            ambiguousCandidates = result.Resolution.AmbiguousCandidates.Select(ToMatch).ToArray(),
-            items = result.Items.Select(ToItem).ToArray(),
-            sourceSpans = result.SourceSpans.Select(span => new
-            {
-                file = span.File,
-                startLine = span.StartLine,
-                endLine = span.EndLine,
-                text = span.Text,
-                candidateIds = span.CandidateIds
-            }).ToArray(),
-            budget = new
-            {
-                requested = result.Budget.RequestedBudget,
-                estimated = result.Budget.EstimatedTokens,
-                truncated = result.Budget.Truncated,
-                reason = result.Budget.TruncationReason
-            },
-            coverage = new
-            {
-                providers = result.Coverage.Providers.Select(status => new
-                {
-                    provider = status.Provider.ToString().ToLowerInvariant(),
-                    state = status.State.ToString().ToLowerInvariant(),
-                    status.Reason,
-                    foundCount = status.FoundCount
-                }),
-                result.Coverage.Remaining,
-                negativeEvidence = result.Coverage.NegativeEvidence
-            },
-            stale = response.Stale,
-            warnings = Array.Empty<string>(),
-            reason = (string?)null
-        });
+        return InvestigationPresentationMapper.Serialize(
+            InvestigationPresentationMapper.ToResponse(query, parsedGoal, result, response.Stale));
 
-        object ToMatch(IndexedSymbol symbol) => new
-        {
-            id = symbol.Id,
-            project = symbol.Project,
-            kind = symbol.Kind.ToString(),
-            name = symbol.Name,
-            qualifiedName = symbol.QualifiedName,
-            file = symbol.RelativePath,
-            startLine = symbol.StartLine,
-            endLine = symbol.EndLine,
-            language = symbol.Language
-        };
-
-        object ToItem(InvestigationCandidate candidate) => new
-        {
-            symbol = ToMatch(candidate.Symbol),
-            via = candidate.Via is null ? null : new
-            {
-                edgeKind = candidate.Via.Kind.ToString(),
-                resolutionKind = candidate.Via.ResolutionKind.ToString().ToLowerInvariant(),
-                confidence = candidate.Via.Confidence,
-                location = candidate.Via.SourceFileId is null && candidate.Via.Line is null
-                    ? null
-                    : new
-                    {
-                        file = candidate.EvidenceLocation?.File ?? candidate.Symbol.RelativePath,
-                        startLine = candidate.EvidenceLocation?.StartLine ?? candidate.Via.Line,
-                        startColumn = candidate.EvidenceLocation?.StartColumn ?? candidate.Via.StartColumn,
-                        endLine = candidate.EvidenceLocation?.EndLine ?? candidate.Via.EndLine,
-                        endColumn = candidate.EvidenceLocation?.EndColumn ?? candidate.Via.EndColumn
-                    }
-            },
-            depth = candidate.Depth,
-            provider = candidate.Provider,
-            alsoFoundBy = candidate.AlsoFoundBy,
-            localEvidence = candidate.LocalEvidence
-        };
     }
 
     [McpServerTool, Description("Compute an intraprocedural C# semantic dependency slice for one executable symbol. Requires a fresh CodeMap index; use refresh_index first when the index is stale.")]

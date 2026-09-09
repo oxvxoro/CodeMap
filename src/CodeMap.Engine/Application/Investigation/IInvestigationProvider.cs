@@ -12,7 +12,9 @@ internal interface IInvestigationProvider
         ICodeMapGraphReader reader,
         IndexedSymbol root,
         InvestigationOverrides overrides,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        int offset = 0,
+        int? window = null);
 }
 
 public sealed record InvestigationProviderResult(

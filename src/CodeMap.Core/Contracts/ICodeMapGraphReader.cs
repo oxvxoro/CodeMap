@@ -15,6 +15,12 @@ public interface ICodeMapGraphReader : IAsyncDisposable
     IReadOnlyList<IndexedRelation> CallerRelations(IndexedSymbol symbol, int maxResults = 200);
     IReadOnlyList<IndexedRelation> CalleeRelations(IndexedSymbol symbol, int depth = 1, int maxResults = 200);
     IReadOnlyList<IndexedRelation> ImplementationRelations(IndexedSymbol symbol, int maxResults = 200);
+    RelationPage<IndexedRelation> CallerRelationsPaged(IndexedSymbol symbol, int limit, int offset, double minConfidence = 0);
+    RelationPage<IndexedRelation> CalleeRelationsPaged(IndexedSymbol symbol, int depth, int limit, int offset, double minConfidence = 0);
+    RelationPage<IndexedRelation> ImplementationRelationsPaged(IndexedSymbol symbol, int limit, int offset, double minConfidence = 0);
+    RelationPage<ImpactItem> ImpactPaged(IndexedSymbol root, int depth, int limit, int offset, string profile);
+    RelationPage<ImpactItem> FlowPaged(IndexedSymbol entry, string kind, int depth, int limit, int offset, double minConfidence);
+    RelationPage<IndexedSymbol> MembersPaged(IndexedSymbol symbol, int limit, int offset);
     IReadOnlyList<RelationQueryResult> Relations(string sourceId, string targetId, EdgeKind? edgeKind, int maxResults, double minConfidence);
     IReadOnlyList<ImpactItem> Impact(IndexedSymbol root, int depth, int maxResults, string profile);
     IReadOnlyList<ImpactItem> Flow(IndexedSymbol entry, string kind, int depth, int maxResults, double minConfidence);

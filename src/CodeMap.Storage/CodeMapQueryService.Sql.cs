@@ -327,15 +327,13 @@ public sealed partial class CodeMapQueryService
         return symbols;
     }
 
-    private IReadOnlyList<IndexedRelation> QueryEdgeRelations(string sql, string symbolId, int maxResults)
+    private IReadOnlyList<IndexedRelation> QueryEdgeRelations(string sql, string symbolId, int maxResults, double minConfidence = 0)
     {
         using var command = _connection!.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("$symbolId", symbolId);
-        // Relation callers deduplicate by symbol after reading edge rows, just
-        // like the snapshot path. Use an effectively unbounded SQL limit so a
-        // duplicate edge cannot consume the public result limit first.
-        command.Parameters.AddWithValue("$maxResults", int.MaxValue);
+        command.Parameters.AddWithValue("$maxResults", QueryLimits.NormalizeMaxResults(maxResults));
+        command.Parameters.AddWithValue("$minConfidence", minConfidence);
         using var reader = command.ExecuteReader();
         var relations = new List<IndexedRelation>();
         while (reader.Read())
@@ -356,7 +354,7 @@ public sealed partial class CodeMapQueryService
 
 
 
-    private IReadOnlyList<IndexedRelation> QueryCalleeRelations(string rootId, int maxDepth, int maxResults)
+    private IReadOnlyList<IndexedRelation> QueryCalleeRelations(string rootId, int maxDepth, int maxResults, double minConfidence = 0)
     {
         using var command = _connection!.CreateCommand();
         command.CommandText = """
@@ -365,7 +363,8 @@ public sealed partial class CodeMapQueryService
                 UNION
                 SELECT e.target_id, c.depth + 1
                 FROM edges e JOIN callees c ON e.source_id = c.id
-                WHERE e.kind = 'Calls' AND c.depth < $maxDepth
+                 WHERE e.kind = 'Calls' AND c.depth < $maxDepth
+                   AND (e.confidence IS NULL OR e.confidence >= $minConfidence)
             ),
             min_depth AS (
                 SELECT id, MIN(depth) AS depth FROM callees WHERE depth > 0 GROUP BY id
@@ -377,7 +376,8 @@ public sealed partial class CodeMapQueryService
                        ROW_NUMBER() OVER (PARTITION BY md.id ORDER BY e.source_id, e.target_id) AS row_number
                 FROM min_depth md
                 JOIN edges e ON e.target_id = md.id AND e.kind = 'Calls'
-                JOIN callees parent ON parent.id = e.source_id AND parent.depth = md.depth - 1
+                 JOIN callees parent ON parent.id = e.source_id AND parent.depth = md.depth - 1
+                WHERE e.confidence IS NULL OR e.confidence >= $minConfidence
             )
             SELECT s.id, s.file_id, f.project, f.relative_path, s.kind, s.name,
                    s.qualified_name, s.signature, s.start_line, s.end_line, s.visibility, s.language,
@@ -390,6 +390,7 @@ public sealed partial class CodeMapQueryService
             """;
         command.Parameters.AddWithValue("$rootId", rootId);
         command.Parameters.AddWithValue("$maxDepth", QueryLimits.NormalizeTraversalDepth(maxDepth));
+        command.Parameters.AddWithValue("$minConfidence", minConfidence);
         command.Parameters.AddWithValue("$maxResults", QueryLimits.NormalizeMaxResults(maxResults));
         using var reader = command.ExecuteReader();
         var relations = new List<IndexedRelation>();
