@@ -6,6 +6,10 @@
     <ProjectReference Include="..\CodeMap.CSharp\CodeMap.CSharp.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="CodeMap.Core.Tests" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>

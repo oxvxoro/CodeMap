@@ -12,6 +12,9 @@ public interface ICodeMapGraphReader : IAsyncDisposable
     IReadOnlyList<IndexedFile> Files();
     IReadOnlyDictionary<string, IndexedFile> FindFilesByIds(IEnumerable<string> ids);
     IReadOnlyList<IndexedSymbol> Members(IndexedSymbol symbol, int maxResults = 200);
+    IReadOnlyList<IndexedRelation> CallerRelations(IndexedSymbol symbol, int maxResults = 200);
+    IReadOnlyList<IndexedRelation> CalleeRelations(IndexedSymbol symbol, int depth = 1, int maxResults = 200);
+    IReadOnlyList<IndexedRelation> ImplementationRelations(IndexedSymbol symbol, int maxResults = 200);
     IReadOnlyList<RelationQueryResult> Relations(string sourceId, string targetId, EdgeKind? edgeKind, int maxResults, double minConfidence);
     IReadOnlyList<ImpactItem> Impact(IndexedSymbol root, int depth, int maxResults, string profile);
     IReadOnlyList<ImpactItem> Flow(IndexedSymbol entry, string kind, int depth, int maxResults, double minConfidence);

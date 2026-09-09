@@ -1,4 +1,6 @@
 using CodeMap.Core.Models;
+using CodeMap.Core.Models.Investigation;
+using CodeMap.Engine.Application.Investigation;
 
 namespace CodeMap.Engine.Application;
 
@@ -10,7 +12,7 @@ public sealed record ApplicationResponse<T>(T? Value, QueryError? Error, bool St
 
     public static ApplicationResponse<T> Success(T value, bool stale = false) => new(value, null, stale);
 
-    public static ApplicationResponse<T> Failure(QueryError error, bool stale = false) => new(default, error, stale);
+    public static ApplicationResponse<T> Failure(QueryError error, bool stale = false, T? value = default) => new(value, error, stale);
 }
 
 public sealed record FindRequest(string Query, string? Root = null, int MaxResults = 20);
@@ -48,6 +50,40 @@ public sealed record ContextRequest(
     string? Root = null,
     int MaxResults = 5,
     int TokenBudget = 500);
+
+public enum InvestigationGoal
+{
+    Debug,
+    Trace,
+    Impact,
+    Understand
+}
+
+public sealed record InvestigationRequest(
+    string Query,
+    InvestigationGoal Goal,
+    string? Root = null,
+    int TokenBudget = 2000,
+    int MaxResults = 200,
+    int? Depth = null,
+    double MinConfidence = 0,
+    bool IncludeHeuristic = true,
+    string SourceMode = "minimal");
+
+public sealed record InvestigationResponse(
+    int Version,
+    string Query,
+    InvestigationGoal Goal,
+    IndexedSymbol? Root,
+    bool IsAmbiguous,
+    IReadOnlyList<IndexedSymbol> AmbiguousCandidates);
+
+public sealed record InvestigationResult(
+    InvestigationResponse Resolution,
+    IReadOnlyList<InvestigationCandidate> Items,
+    InvestigationSelection Budget,
+    InvestigationCoverage Coverage,
+    IReadOnlyList<InvestigationSourceSpan> SourceSpans);
 
 public sealed record ApplicationContextResult(
     IReadOnlyList<IndexedSymbol> Matches,

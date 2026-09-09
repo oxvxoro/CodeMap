@@ -47,5 +47,6 @@ internal static class CommandCatalog
         Program.AddContextCommand(rootCommand);
         Program.AddFlowCommand(rootCommand);
         Program.AddSliceCommand(rootCommand);
+        Program.AddInvestigateCommand(rootCommand);
     }
 }

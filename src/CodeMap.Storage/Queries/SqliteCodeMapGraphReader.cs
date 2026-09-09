@@ -22,6 +22,9 @@ public sealed class SqliteCodeMapGraphReader : ICodeMapGraphReader
     public IReadOnlyList<IndexedFile> Files() => _service.Files();
     public IReadOnlyDictionary<string, IndexedFile> FindFilesByIds(IEnumerable<string> ids) => _service.FindFilesByIds(ids);
     public IReadOnlyList<IndexedSymbol> Members(IndexedSymbol symbol, int maxResults = 200) => _service.Members(symbol, maxResults);
+    public IReadOnlyList<IndexedRelation> CallerRelations(IndexedSymbol symbol, int maxResults = 200) => _service.CallerRelations(symbol, maxResults);
+    public IReadOnlyList<IndexedRelation> CalleeRelations(IndexedSymbol symbol, int depth = 1, int maxResults = 200) => _service.CalleeRelations(symbol, depth, maxResults);
+    public IReadOnlyList<IndexedRelation> ImplementationRelations(IndexedSymbol symbol, int maxResults = 200) => _service.ImplementationRelations(symbol, maxResults);
     public IReadOnlyList<RelationQueryResult> Relations(string sourceId, string targetId, EdgeKind? edgeKind, int maxResults, double minConfidence) => _service.Relations(sourceId, targetId, edgeKind, maxResults, minConfidence);
     public IReadOnlyList<ImpactItem> Impact(IndexedSymbol root, int depth, int maxResults, string profile) => _service.Impact(root, depth, maxResults, profile);
     public IReadOnlyList<ImpactItem> Flow(IndexedSymbol entry, string kind, int depth, int maxResults, double minConfidence) => _service.Flow(entry, kind, depth, maxResults, minConfidence);

@@ -16,6 +16,12 @@ approval_mode = "approve"
 [mcp_servers.rider.tools.apply_patch]
 approval_mode = "approve"
 
+[mcp_servers.rider.tools.build_solution_start]
+approval_mode = "approve"
+
+[mcp_servers.rider.tools.build_solution_state]
+approval_mode = "approve"
+
 [sandbox_workspace_write]
 network_access = true
 

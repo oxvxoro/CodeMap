@@ -3,6 +3,8 @@ using CodeMap.Core.Contracts;
 using CodeMap.Core.Models;
 using CodeMap.CSharp;
 using CodeMap.Engine.Concurrency;
+using CodeMap.Engine.Application.Investigation;
+using CodeMap.Core.Models.Investigation;
 
 namespace CodeMap.Engine.Application;
 
@@ -146,6 +148,88 @@ public sealed class CodeMapApplication
         });
     }
 
+    public async Task<ApplicationResponse<InvestigationResult>> InvestigateAsync(
+        InvestigationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrWhiteSpace(request.Query))
+            return ApplicationResponse<InvestigationResult>.Failure(
+                new("query_failed", "A symbol query is required."));
+        if (request.TokenBudget <= 0 || request.MaxResults <= 0)
+            return ApplicationResponse<InvestigationResult>.Failure(
+                new("query_failed", "tokens and max-results must be greater than zero."));
+        if (!RelationConfidence.IsValid(request.MinConfidence))
+            return ApplicationResponse<InvestigationResult>.Failure(
+                new("query_failed", RelationConfidence.InvalidMessage));
+        if (request.Depth is <= 0 or > 8)
+            return ApplicationResponse<InvestigationResult>.Failure(
+                new("query_failed", "depth must be between 1 and 8."));
+        if (request.SourceMode is not ("none" or "minimal" or "scope"))
+            return ApplicationResponse<InvestigationResult>.Failure(
+                new("query_failed", "source-mode must be one of: none, minimal, scope."));
+
+        return await WithServiceAsync(request.Root, cancellationToken, async (service, stale) =>
+        {
+            var resolution = service.ResolveSymbol(request.Query, callableOnly: false, request.MaxResults);
+            if (resolution.Matches.Count == 0)
+                return ApplicationResponse<InvestigationResult>.Failure(
+                    new("no_matches", $"No symbol matches '{request.Query}'."), stale);
+            if (resolution.IsAmbiguous || resolution.Matches.Count > 1)
+                return ApplicationResponse<InvestigationResult>.Failure(
+                    new("ambiguous", $"Symbol query '{request.Query}' is ambiguous."),
+                    stale,
+                    new InvestigationResult(
+                        new InvestigationResponse(1, request.Query, request.Goal, null, true, resolution.Matches),
+                        Array.Empty<InvestigationCandidate>(),
+                        new InvestigationBudgetAllocator().Allocate(Array.Empty<InvestigationCandidate>(), request.TokenBudget),
+                        InvestigationCoverage.Empty,
+                        Array.Empty<InvestigationSourceSpan>()));
+
+            var root = resolution.Matches[0];
+            var queryRoot = Path.GetFullPath(string.IsNullOrWhiteSpace(request.Root)
+                ? Directory.GetCurrentDirectory()
+                : request.Root);
+            var overrides = new InvestigationOverrides(
+                request.MaxResults,
+                request.Depth ?? (request.Goal == InvestigationGoal.Trace ? 4 : request.Goal == InvestigationGoal.Impact ? 2 : 1),
+                request.MinConfidence,
+                request.IncludeHeuristic,
+                request.TokenBudget,
+                queryRoot);
+            var orchestrator = new InvestigationOrchestrator(
+                new InvestigationRankingPolicy(),
+                new InvestigationBudgetAllocator(),
+                goal => InvestigationProfiles.Create(goal, SliceForInvestigationAsync));
+            var result = await orchestrator.RunAsync(request.Goal, service, root, overrides, cancellationToken);
+            var coverage = new CoverageAggregator().Aggregate(
+                result.ProviderStatuses,
+                result.Selection.Selected.Concat(result.Selection.Excluded).ToArray(),
+                result.Selection.Selected,
+                service,
+                root,
+                request);
+            var sourceMode = Enum.Parse<SourceEvidenceMode>(request.SourceMode, ignoreCase: true);
+            var sourceSpans = new SourceEvidenceBuilder().BuildSpans(
+                result.Candidates,
+                sourceMode,
+                Math.Max(0, request.TokenBudget - result.Selection.EstimatedTokens),
+                new FileTextAccessor(queryRoot));
+            var response = new InvestigationResponse(1, request.Query, request.Goal, root, false, Array.Empty<IndexedSymbol>());
+            return ApplicationResponse<InvestigationResult>.Success(
+                new InvestigationResult(response, result.Candidates, result.Selection, coverage, sourceSpans), stale);
+        });
+
+        async Task<SemanticSliceResult> SliceForInvestigationAsync(
+            IndexedSymbol symbol, string projectRoot, CancellationToken token)
+        {
+            return await new CodeMapSemanticSliceService(_indexerFactory()).SliceAsync(
+                projectRoot,
+                new SemanticSliceRequest(Query: symbol.QualifiedName, MaxResults: request.MaxResults),
+                token);
+        }
+    }
+
     public async Task<ApplicationResponse<CodeMapIndexStatus>> StatusAsync(
         StatusRequest request,
         CancellationToken cancellationToken = default)
@@ -224,6 +308,28 @@ public sealed class CodeMapApplication
                     _freshness.IsUpToDateAsync);
             await using var reader = await _graphReaderFactory(database, cancellationToken);
             return action(reader, stale);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return ApplicationResponse<T>.Failure(Classify(exception));
+        }
+    }
+
+    private async Task<ApplicationResponse<T>> WithServiceAsync<T>(
+        string? requestedRoot,
+        CancellationToken cancellationToken,
+        Func<ICodeMapGraphReader, bool, Task<ApplicationResponse<T>>> action)
+    {
+        try
+        {
+            var queryRoot = Path.GetFullPath(string.IsNullOrWhiteSpace(requestedRoot)
+                ? Directory.GetCurrentDirectory()
+                : requestedRoot);
+            var database = CodeMapIndexLocator.FindDatabase(queryRoot);
+            var stale = _freshness is not null
+                && await CodeMapIndexLocator.IsStaleAsync(database, cancellationToken, _freshness.IsUpToDateAsync);
+            await using var reader = await _graphReaderFactory(database, cancellationToken);
+            return await action(reader, stale);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
